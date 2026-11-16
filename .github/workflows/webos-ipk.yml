@@ -73,6 +73,15 @@ jobs:
             echo "configured=no" >> "$GITHUB_OUTPUT"
             echo "::warning::No NUVIO_LOCAL_PROPERTIES secret: this .ipk has no account server and stops at the login screen."
           fi
+      # tools/arm.sh builds the Rust static libraries (MKV parser, DV7 converter)
+      # on the host, not in the image, and defaults to a path on the author's
+      # disk. Same pinned toolchain as tools/Dockerfile.
+      - name: Rust toolchain for the ARM static libraries
+        run: |
+          rustup toolchain install 1.88.0 --profile minimal --target armv7-unknown-linux-gnueabi
+          rustup default 1.88.0
+          echo "RUSTUP_HOME=${RUSTUP_HOME:-$HOME/.rustup}" >> "$GITHUB_ENV"
+          echo "CARGO_HOME=${CARGO_HOME:-$HOME/.cargo}" >> "$GITHUB_ENV"
       - name: Build and package
         env:
           NUVIO_CONTAINER_RUNTIME: docker
