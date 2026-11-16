@@ -662,6 +662,27 @@ static VideoFaixa dtsNativeTarget;
 static char dtsLegUrlAntes[1024];
 static char cabsHttp[512];
 static int iniciarDts(int stream);
+/* External audio (docs/features/external-audio): another source supplies the
+ * audio of this playback through the fed pipeline. extStart asks video_bombear
+ * to open that pipeline when the TV player is the one playing. */
+static char extUrl[4096], extHeaders[2048];
+static int extWanted, extStart, extOffsetMs;
+/* Off by default: NUVIO_EXT_AUDIO=1 in the environment, or the file
+ * /tmp/nuvio-ext-audio (the convention of /tmp/nuvio-dts-liberar), turns it on. */
+static int extFlag(void) {
+  const char *v = getenv("NUVIO_EXT_AUDIO");
+  return (v && !strcmp(v, "1")) || access("/tmp/nuvio-ext-audio", F_OK) == 0;
+}
+static DtsExtAudio extRequest(void) {
+  /* No track is chosen by hand yet: the first one in the preferred audio
+   * language, else the first audio track of the other source. */
+  return (DtsExtAudio){ .url = extUrl, .headers = extHeaders, .language = ling_audio(),
+                        .stream_index = -1, .offset_ms = extOffsetMs };
+}
+static void extForget(void) {
+  extWanted = extStart = 0; extUrl[0] = 0;
+  memset(extHeaders, 0, sizeof extHeaders);
+}
 static void bombearDts(void);
 static int dtsLiberadoNestaTv(void);
 // RECONEXAO (video_reconexao.h). O erro chega no fio do LS2 e so ANOTA
@@ -2336,6 +2357,7 @@ int  video_reconectando(void) {
 int video_tocar(const char *url) {
   dvRecuado = 0;
   dtsTentou = 0; dtsRevisao = 0; dtsSaida[0] = 0; dtsNativePending = 0; dtsEstado = 0;
+  extForget();   /* The other source belonged to the previous playback. */
   dtsHabilitado = dts_playback_enabled() && dtsLiberadoNestaTv();
   printf("[dts] fallback %s\n", dtsHabilitado ? "available" : "unavailable");
   dvSondado = dvMkvPerfil = dvAudios = 0; dtsModoDv = 0; dvAudioMkvOrd = -1; dvSegurar = 0;
@@ -2386,6 +2408,15 @@ void video_bombear(void) {
   acbBindRecolher();
   if (ligado) acbConfigurarTipo(dtsSessao != NULL);
   if (dtsSessao) bombearDts();
+  else if (extStart && urlAtual[0] && !modoLoad) {
+    /* External audio asked while the TV player plays: open the fed pipeline.
+     * A Dolby Vision file keeps its Dolby Vision where this TV has that path.
+     * iniciarDts clears extStart unless an old bind makes it wait a pump. */
+    dtsModoDv = dvLiberadoNestaTv() && dvSondado && dvMkvPerfil &&
+                nv_dv7_profile(dvMkvPerfil, dvMkvEl, dvMkvBl, dvMkvRpu) &&
+                nv_dv7_selected(dvMkvPerfil, ajustes_dv_mkv(), ajustes_dv7());
+    iniciarDts(-1);
+  }
   else if (dvHabilitado && !dtsNativePending && !dtsTentou && !modoLoad && urlAtual[0] && !dvSegurar && dvPronto()) {
     dtsModoDv = 1;
     iniciarDts(-1);
@@ -3032,6 +3063,7 @@ static int iniciarDts(int stream) {
   /* Retry from the next pump before unloading or spawning a native worker.
    * The old bind must finish before its ACB handle can become MSE. */
   if (bindAtivo()) return 0;
+  extStart = 0;
   DtsTrack selected;
   const VideoFaixa *a = video_audio(audioAtual);
   // A POSICAO DE PARTIDA. Um seek pedido ao player da TV e ainda nao feito (o
@@ -3081,14 +3113,26 @@ static int iniciarDts(int stream) {
   dts_engine_set_ahead_mib(cacheboost_backend_buffer_mb());   // #338: Settings > Buffer size
   dts_playback_next_dv(dtsModoDv);
   dts_playback_next_p7(ajustes_dv7());
+  if (extWanted) {
+    DtsExtAudio ext = extRequest();
+    dtsSessao = dts_playback_start_ext(urlAtual, cabsHttp, stream, alvo, paused, expWin, 0,
+                                       (a || trocada) ? &selected : NULL, ordinal, count, &ext);
+  } else
   dtsSessao = dts_playback_start(urlAtual, cabsHttp, stream, alvo,
                                paused, expWin, 0, (a || trocada) ? &selected : NULL, ordinal, count);
   if (!dtsSessao) {
     dtsMarcarAbertas(0);
     marco("DTS startup failed: software playback unavailable");
     dvCaminhoNaoAbriu();
+    extForget();
     dtsVoltarNativo("converter unavailable");
     return 0;
+  }
+  if (extWanted && !dtsModoDv) {
+    /* Not a DTS conversion: nothing to announce as one. */
+    dtsEstado = 0;
+    marco("External audio: fed pipeline requested");
+    return 1;
   }
   if (dtsModoDv) {
     marco("Dolby Vision: MKV path requested");
@@ -3138,6 +3182,15 @@ static void bombearDts(void) {
   int i;
   memset(&st, 0, sizeof st);
   dts_playback_status(dtsSessao, &st);
+  /* The other source failed: the worker already plays this source's own audio
+   * (or is about to fail below, when it has none the path can feed). */
+  int extLeft = extWanted && (st.ext_fallback || st.failed);
+  if (extLeft) {
+    printf("[ext-audio] left: %.95s\n", st.ext_error[0] ? st.ext_error : st.error); fflush(stdout);
+    extForget();
+    ilha_avisar("ext-audio", ILHA_ERRO, NULL,
+                "External audio failed. Back to this source's audio.", 8000u, 0);
+  }
   if (st.failed) {
     /* A fast startup failure can happen before the main thread sees its stages. */
     while (dts_playback_event(dtsSessao, event, sizeof event)) logDtsStage(event);
@@ -3155,6 +3208,8 @@ static void bombearDts(void) {
       return;
     }
     dtsVoltarNativo("converter");
+    /* The TV player has this source's sound; no "conversion failed" state. */
+    if (extLeft) dtsEstado = 0;
     return;
   }
   /* Load may synchronously queue videoInfo/playing before the worker publishes
@@ -3239,6 +3294,12 @@ static void bombearDts(void) {
     }
     /* Converted only when the source track is DTS; on the Dolby Vision path
      * AC-3/E-AC-3 pass through untouched and there is nothing to label. */
+    /* External audio: no track of this list is the one playing; keep the
+     * index valid and label nothing as a conversion of this source. */
+    if (st.ext_audio) {
+      if (audioAtual >= nAudio) audioAtual = 0;
+      dtsSaida[0] = 0; dtsEstado = 0;
+    } else
     if (!dtsModoDv || (audioAtual >= 0 && audioAtual < nAudio && !strcmp(faixaAudio[audioAtual].codec, "dts"))) {
       snprintf(dtsSaida, sizeof dtsSaida, "%s", !strcmp(st.info.audio_codec, "ac3") ? "DTS → AC3 5.1" : "DTS → AAC Stereo");
       dtsEstado = VIDEO_DTS_CONVERTIDO;
@@ -3738,11 +3799,53 @@ void video_forcar_sdr(void) {
 
 void video_definir_dv(int dv) { dvPedido = dv ? 1 : 0; }
 
+int video_ext_audio_available(void) {
+  return extFlag() && urlAtual[0] && !modoLoad && (dtsSessao || dtsHabilitado);
+}
+int video_ext_audio_active(void) { return extWanted; }
+int video_ext_audio_offset(void) { return extOffsetMs; }
+int video_ext_audio_set(const char *url, const char *headers) {
+  if (!video_ext_audio_available() || !url || !*url || strlen(url) >= sizeof extUrl ||
+      (headers && strlen(headers) >= sizeof extHeaders)) return 0;
+  snprintf(extUrl, sizeof extUrl, "%s", url);
+  snprintf(extHeaders, sizeof extHeaders, "%s", headers ? headers : "");
+  extWanted = 1;
+  printf("[ext-audio] requested, offset %d ms, %s\n", extOffsetMs,
+         dtsSessao ? "into the open session" : "opening the fed pipeline");
+  fflush(stdout);
+  if (dtsSessao) {
+    DtsExtAudio ext = extRequest();
+    dts_playback_seek(dtsSessao, posSeg);
+    dts_playback_ext_audio(dtsSessao, &ext);
+  } else extStart = 1;
+  return 1;
+}
+void video_ext_audio_clear(void) {
+  int was = extWanted;
+  extForget();
+  /* Without a track of its own the path can feed, the session fails here and
+   * the TV player takes this source back, as after any conversion failure. */
+  if (was && dtsSessao) {
+    dts_playback_seek(dtsSessao, posSeg);
+    dts_playback_ext_audio(dtsSessao, NULL);
+  }
+}
+void video_ext_audio_set_offset(int ms) {
+  if (ms > DTS_EXT_OFFSET_MAX_MS) ms = DTS_EXT_OFFSET_MAX_MS;
+  if (ms < -DTS_EXT_OFFSET_MAX_MS) ms = -DTS_EXT_OFFSET_MAX_MS;
+  if (ms == extOffsetMs) return;
+  extOffsetMs = ms;
+  if (dtsSessao && extWanted) dts_playback_ext_offset(dtsSessao, ms);
+}
+
 void video_escolher_audio(int i) {
   char b[192];
   const VideoFaixa *f = video_audio(i);
   if (dtsSessao && f) {
     if (f->stream_index < 0) return;
+    /* One of this source's own tracks: the other source is left (the worker
+     * does the same on dts_playback_audio; the other branch reloads natively). */
+    extForget();
     if (!strcmp(f->codec, "dts") ||
         (dtsModoDv && (!strcmp(f->codec, "eac3") || !strcmp(f->codec, "ac3")))) {
       dts_playback_seek(dtsSessao, posSeg);

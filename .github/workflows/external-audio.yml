@@ -1,0 +1,61 @@
+name: External audio host checks
+# Host tests of docs/features/external-audio. They prove the worker and engine
+# logic, not playback on any TV.
+on:
+  push:
+    branches: [feat/external-audio]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: external-audio-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  worker:
+    name: Playback worker and webOS controller
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      ASAN_OPTIONS: detect_leaks=0
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Install host dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential pkg-config libsdl2-dev libsdl2-image-dev libsdl2-ttf-dev libgles2-mesa-dev libegl1-mesa-dev zlib1g-dev libssl-dev
+      - name: Existing playback worker scenarios
+        run: |
+          bash tests/dts_playback.sh
+          SANITIZE=1 bash tests/dts_playback.sh
+      - name: External audio in the playback worker
+        run: |
+          bash tests/dts_ext_audio.sh
+          SANITIZE=1 bash tests/dts_ext_audio.sh
+      - name: webOS controller (luna branch of video.c) builds and passes
+        run: bash tests/video_acb_lg.sh
+  engine:
+    name: Real engine with synthetic MKVs
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      ASAN_OPTIONS: detect_leaks=0
+      NUVIO_DTS_ROOT: /tmp/nuvio-dts-host
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Install host dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential pkg-config ffmpeg curl python3 libssl-dev
+      - name: Build minimal host FFmpeg
+        env:
+          NUVIO_DTS_HOST: '1'
+          CC: gcc
+        run: bash tools/build-dts-ffmpeg.sh
+      - name: Existing engine fixtures
+        run: bash tests/dts_engine.sh
+      - name: External audio engine roles
+        run: bash tests/dts_ext_engine.sh

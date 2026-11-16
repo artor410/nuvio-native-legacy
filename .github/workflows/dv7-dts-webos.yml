@@ -42,8 +42,6 @@ jobs:
           bash tests/rede_dns.sh
           bash tests/dts_playback.sh
           SANITIZE=1 bash tests/dts_playback.sh
-          bash tests/dts_ext_audio.sh
-          SANITIZE=1 bash tests/dts_ext_audio.sh
       - name: Independent device-local DV7 option
         if: ${{ !cancelled() && matrix.group == 'settings' }}
         run: bash tests/dv7_settings.sh
@@ -64,7 +62,6 @@ jobs:
           SANITIZE=1 bash tests/dts_timestamp_engine.sh
           bash tests/dts_buffer64.sh
           bash tests/dts_engine.sh
-          bash tests/dts_ext_engine.sh
       - name: DV7 conversion and Rust link modes
         if: ${{ !cancelled() && matrix.group == 'dv' }}
         run: |

@@ -276,6 +276,19 @@ int  video_iniciando(void);
 // 1 once the current source has played on webOS (kept across reloads of it).
 int video_fonte_tocou(void);
 const char *video_dts_saida(void);  // actual local conversion output, empty for native playback
+// External audio (docs/features/external-audio), webOS only (defined in the
+// luna branch of video.c; callers guard with NV_WEBOS && NV_DTS_FFMPEG). The
+// video of the playing source with one audio track of another source, through
+// the fed pipeline. Off unless the flag is set (see the feature README).
+// _set returns 0 when refused; a later failure of the other source shows a
+// notice and returns to this source's audio. Offset in ms, positive = audio
+// later; it is kept for the next _set.
+int  video_ext_audio_available(void);
+int  video_ext_audio_active(void);
+int  video_ext_audio_set(const char *url, const char *headers);
+void video_ext_audio_clear(void);
+int  video_ext_audio_offset(void);
+void video_ext_audio_set_offset(int ms);
 int    video_audio_nao_suportado(void);  // uMS errorCode 200: video segue sem som
 int    video_seek_desistiu(void);  // webOS: seek recusado 3x; segue tocando de onde esta
 int    video_terminou(void); // 1 depois do fim de fluxo (endOfStream) da fonte atual
