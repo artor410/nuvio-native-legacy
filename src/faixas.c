@@ -30,6 +30,12 @@
 #include "faixasmkv.h"
 #define NV_ESCALA_TELA   // o arquivo inteiro mede pela tela virtual (escala.h)
 #include "escala.h"
+// External audio (docs/features/external-audio): webOS with the fed pipeline.
+#if defined(NV_WEBOS) && defined(NV_DTS_FFMPEG)
+#define FX_EXT 1
+#include "streams.h"
+#include "ilha.h"
+#endif
 #include <stdio.h>
 #include <string.h>
 #include <strings.h>
@@ -500,6 +506,11 @@ void faixas_abrir_em(int col) {
   ctl = -1;
   volFoco = 0; velFoco = 0;
   foco[0] = video_audio_atual();
+#ifdef FX_EXT
+  // Opens on the tracks; with external audio on, on its row.
+  extPick = 0;
+  if (extOn() && video_ext_audio_active()) foco[0] = video_n_audio();
+#endif
   // A legenda pode estar desligada (-1); a primeira linha da coluna e sempre
   // "Desativada", entao o indice da lista e deslocado em um.
   foco[1] = linhaDaLeg(legendaAtiva()) + 1;
@@ -575,8 +586,108 @@ static int linhaDaLeg(int i) {
   return i;
 }
 
+#ifdef FX_EXT
+// EXTERNAL AUDIO (docs/features/external-audio) in the audio sheet. After the
+// tracks comes one row that opens the picker (or, while external audio is on,
+// turns it off) and then the offset row: LEFT/RIGHT, 50 ms a press and 100 ms
+// while the key repeats. In the picker the column lists the other sources
+// already resolved for this title; Back returns to the tracks.
+#define FX_EXT_MAX 48
+// The offset reloads the pipeline, so it is applied once the presses stop.
+#define FX_EXT_APPLY_MS 700u
+static int extPick, extCand[FX_EXT_MAX], extCandN;
+static int extOffVal, extOffPending;
+static Uint32 extOffAt;
+static int extOn(void) { return !modo && !player_id_canal()[0] && video_ext_audio_available(); }
+static int extRows(void) { return extOn() ? 1 + (video_ext_audio_active() ? 1 : 0) : 0; }
+static int extOffset(void) { return extOffPending ? extOffVal : video_ext_audio_offset(); }
+// Direct HTTP sources only: the engine cannot open a torrent or the playing source twice.
+static void extListar(void) {
+  int i, n = stream_n(), atual = stream_atual();
+  extCandN = 0;
+  for (i = 0; i < n && extCandN < FX_EXT_MAX; i++) {
+    const Stream *s = stream_item(i);
+    if (!s || i == atual || s->urlP2P || strncmp(s->url, "http", 4)) continue;
+    extCand[extCandN++] = i;
+  }
+}
+// Name and second line of row `i` of the audio column when it is not a track.
+// Returns 0 for a track row.
+static int extRotulo(int i, char *nome, size_t tn, char *sub, size_t ts) {
+  int na = video_n_audio();
+  if (extPick) {
+    const Stream *s = i >= 0 && i < extCandN ? stream_item(extCand[i]) : NULL;
+    if (!s) {
+      snprintf(nome, tn, "%s", "No other source");
+      snprintf(sub, ts, "%s", "This title has no other direct source");
+    } else {
+      snprintf(nome, tn, "%s", s->rotulo);
+      snprintf(sub, ts, "%.40s%s%.48s", s->provedor, s->audioIdiomas[0] ? " · " : "", s->audioIdiomas);
+    }
+    return 1;
+  }
+  if (!extOn() || i < na) return 0;
+  if (i == na) {
+    int on = video_ext_audio_active();
+    snprintf(nome, tn, "%s", on ? "External audio: on" : "Audio from another source...");
+    snprintf(sub, ts, "%s", on ? "OK turns it off" : "This video with the audio of another source");
+  } else {
+    snprintf(nome, tn, "%s", "Audio offset");
+    snprintf(sub, ts, "%+d ms · left/right: 50 ms", extOffset());
+  }
+  return 1;
+}
+// 1 = the key belonged to an external audio row or to the picker.
+static int extTecla(SDL_Keycode k, int rep) {
+  int na = video_n_audio(), ok = k == SDLK_RETURN || k == SDLK_KP_ENTER;
+  if (!extOn() || coluna != 0) { extPick = 0; return 0; }
+  if (volFoco || velFoco) return 0;
+  if (extPick) {
+    if (k == SDLK_AC_BACK || k == SDLK_ESCAPE || k == SDLK_BACKSPACE) {
+      extPick = 0; foco[0] = na; rolagem[0] = 0; ajustarRolagem(); return 1;
+    }
+    if (ok) {
+      const Stream *s = foco[0] >= 0 && foco[0] < extCandN ? stream_item(extCand[foco[0]]) : NULL;
+      extPick = 0;
+      if (s && !video_ext_audio_set(s->url, s->cabecalhos))
+        ilha_avisar("ext-audio", ILHA_ERRO, NULL, "External audio is not available for this source.", 6000u, 0);
+      aberta = 0; return 1;
+    }
+    return 0;
+  }
+  if (foco[0] == na && ok) {
+    if (video_ext_audio_active()) { video_ext_audio_clear(); extOffPending = 0; return 1; }
+    extListar(); extPick = 1; foco[0] = 0; rolagem[0] = 0; return 1;
+  }
+  if (foco[0] == na + 1 && video_ext_audio_active()) {
+    if (k == SDLK_LEFT || k == SDLK_RIGHT) {
+      if (!extOffPending) extOffVal = video_ext_audio_offset();
+      extOffVal += (rep ? 100 : 50) * (k == SDLK_RIGHT ? 1 : -1);
+      extOffPending = 1; extOffAt = SDL_GetTicks();
+      return 1;
+    }
+    if (ok) { aberta = 0; return 1; }
+  }
+  return 0;
+}
+static void extAtualizar(Uint32 agora) {
+  if (extOffPending && (!aberta || agora - extOffAt >= FX_EXT_APPLY_MS)) {
+    extOffPending = 0; video_ext_audio_set_offset(extOffVal);
+    // The player clamps: show what it kept, not what was typed.
+    extOffVal = video_ext_audio_offset();
+  }
+  if (video_ext_audio_notice_consume())
+    ilha_avisar("ext-audio", ILHA_ERRO, NULL, "External audio failed. Back to this source's audio.", 8000u, 0);
+  if (!aberta) extPick = 0;
+}
+#endif
+
 static int nLinhas(int col) {
   if (col == FX_COL_ESTILO) return FX_N_ESTILO;
+#ifdef FX_EXT
+  if (col == 0 && extPick) return extCandN > 0 ? extCandN : 1;
+  if (col == 0) return video_n_audio() + extRows();
+#endif
   if (col == 0) { int n = video_n_audio(); return n; }
   return nLegendas() + 1;   // +1 pela linha "Desativada"
 }
@@ -944,6 +1055,10 @@ static void lembrarManual(int i) {
 }
 
 static void aplicar(void) {
+#ifdef FX_EXT
+  // Rows of external audio are handled by extTecla; they are not tracks.
+  if (coluna == 0 && (extPick || foco[0] >= video_n_audio())) return;
+#endif
   if (coluna == 0) {
     // F06: outra faixa de audio = outras falas; a escuta em curso nao vale mais.
     if (video_audio_atual() != foco[0]) legsync_audio_trocou();
@@ -1222,6 +1337,10 @@ void faixas_evento(const SDL_Event *e) {
   k = e->key.keysym.sym;
   // ESTILO: Voltar fecha antes o controle aberto (slider, paleta, fontes).
   if (coluna == FX_COL_ESTILO && estiloTecla(k, e->key.repeat)) return;
+#ifdef FX_EXT
+  // Before Back: in the picker of the other source it returns to the tracks.
+  if (extTecla(k, e->key.repeat)) return;
+#endif
   if (k == SDLK_AC_BACK || k == SDLK_ESCAPE || k == SDLK_BACKSPACE) { aberta = 0; return; }
   // F07: the volume row of the audio sheet. The change is live (no OK needed);
   // OK just closes, like Back.
@@ -1289,6 +1408,9 @@ static void avisarQueda(int e) {
 }
 
 void faixas_atualizar(float dt, Uint32 agora) {
+#ifdef FX_EXT
+  extAtualizar(agora);
+#endif
   if (aberta && modo && coluna == 1) legendasui_atualizar(dt);
   // #202: the platform refused the speed (LG/.tpk answer after the request):
   // the row is gone and playback is back at 1x; say it once.
@@ -1526,7 +1648,14 @@ static void linhaLista(int col, int i, float x, float y, float w, float a) {
   int ativo;
   GfxRect lr = { x, y, w, IL_LN_H };
   nome[0] = sub[0] = 0;
-  if (!col) {
+#ifdef FX_EXT
+  int ext = !col && extRotulo(i, nome, sizeof nome, sub, sizeof sub);
+#else
+  int ext = 0;
+#endif
+  if (ext) {
+    // Named above: a row of external audio, not a track of this source.
+  } else if (!col) {
     const VideoFaixa *f = video_audio(i);
     partirRotulo(f ? f->rotulo : "", nome, sizeof nome, sub, sizeof sub);
     idioma = f ? f->idioma : NULL;
@@ -1546,6 +1675,15 @@ static void linhaLista(int col, int i, float x, float y, float w, float a) {
   if (sel) plrui_linha_foco(lr, 22.0f, a);
   rostoIdioma((GfxRect){ x + 22.0f, y + (IL_LN_H - 52.0f) * 0.5f, 52.0f, 52.0f }, idioma, icone, sel, a);
   ativo = col == 0 ? i == video_audio_atual() : legDaLinha(i - 1) == legendaAtiva();
+#ifdef FX_EXT
+  // While the audio comes from another source no track of this one is the
+  // playing one: the mark goes to the "External audio: on" row.
+  if (!col && extOn()) {
+    if (extPick) ativo = 0;
+    else if (video_ext_audio_active()) ativo = i == video_n_audio();
+    else if (ext) ativo = 0;
+  }
+#endif
   { float tx = x + 22.0f + 52.0f + 18.0f, tw = w - (tx - x) - 22.0f - (ativo ? 46.0f : 0.0f);
     int c = sel ? 255 : 219, cs = 122;
     TxtLinha ln = txt_linha_corta(TXT_ILHA_FORTE, nome, c, c, c - 2, 255, tw);

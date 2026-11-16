@@ -63,7 +63,7 @@ static int drain(DtsEngine *e,int kind,int stream,const char *outdir,const char 
 int main(int argc,char **argv) {
   assert(argc==4 || argc==5);
   const char *movie=argv[1],*dub=argv[2],*outdir=argv[3];
-  const DtsMediaInfo *info; DtsBufferInfo buffer; DtsFrame f;
+  const DtsMediaInfo *info; DtsBufferInfo buffer; DtsFrame f; int frames;
   DtsEngine *e=dts_engine_create(); assert(e && dts_engine_available());
 
   /* The movie's only audio is AC-3 and this is not a Dolby Vision session: in
@@ -90,7 +90,8 @@ int main(int argc,char **argv) {
   assert(info->audio_stream==1 && info->video_stream==-1);
   assert(!strcmp(info->audio_codec,"eac3") && info->channels==6 && info->sample_rate==48000);
   assert(info->n_tracks==5 && !strcmp(info->tracks[2].language,"por"));
-  assert(drain(e,DTS_AUDIO,1,outdir,"eac3.bin")==125); /* 4 s of 32 ms frames. */
+  frames=drain(e,DTS_AUDIO,1,outdir,"eac3.bin"); printf("eac3 frames: %d\n",frames);
+  assert(frames>=124 && frames<=127); /* 4 s of 32 ms frames; encoders pad differently. */
   /* Its own read-ahead: 6 + 1 ranges of 1 MiB, not the 33 MiB default. */
   dts_engine_buffer_info(e,&buffer); assert(buffer.capacity_bytes==7*1048576LL);
 
@@ -98,13 +99,15 @@ int main(int argc,char **argv) {
   check(e,dts_engine_open(e,dub,HEADERS,2,0,0));
   info=dts_engine_info(e);
   assert(info->audio_stream==2 && !strcmp(info->audio_codec,"ac3") && info->channels==6);
-  assert(drain(e,DTS_AUDIO,2,outdir,"ac3.bin")==125);
+  frames=drain(e,DTS_AUDIO,2,outdir,"ac3.bin"); printf("ac3 frames: %d\n",frames);
+  assert(frames>=124 && frames<=127);
 
   /* Stereo 48 kHz AAC-LC is the one AAC the native pipeline declares: untouched. */
   check(e,dts_engine_open(e,dub,HEADERS,3,0,0));
   info=dts_engine_info(e);
   assert(info->audio_stream==3 && !strcmp(info->audio_codec,"aac") && info->channels==2 && info->sample_rate==48000);
-  assert(drain(e,DTS_AUDIO,3,outdir,"aac.bin")>=187); /* 4 s of 21.3 ms frames. */
+  frames=drain(e,DTS_AUDIO,3,outdir,"aac.bin"); printf("aac frames: %d\n",frames);
+  assert(frames>=186 && frames<=190); /* 4 s of 21.3 ms frames. */
 
   /* Seek: the first packet delivered is the one that contains the target. */
   check(e,dts_engine_open(e,dub,HEADERS,2,0,0));

@@ -35,6 +35,10 @@ jobs:
           SANITIZE=1 bash tests/dts_ext_audio.sh
       - name: webOS controller (luna branch of video.c) builds and passes
         run: bash tests/video_acb_lg.sh
+      - name: Audio sheet compiles for webOS with external audio, and without it
+        run: |
+          cc -fsyntax-only -std=gnu11 -Wall -Isrc $(pkg-config --cflags sdl2) -DNV_WEBOS -DNV_DTS_FFMPEG src/faixas.c
+          cc -fsyntax-only -std=gnu11 -Wall -Isrc $(pkg-config --cflags sdl2) src/faixas.c
   engine:
     name: Real engine with synthetic MKVs
     runs-on: ubuntu-24.04

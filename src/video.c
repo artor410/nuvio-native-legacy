@@ -667,6 +667,9 @@ static int iniciarDts(int stream);
  * to open that pipeline when the TV player is the one playing. */
 static char extUrl[4096], extHeaders[2048];
 static int extWanted, extStart, extOffsetMs;
+/* The flag as read when this playback started; the failure note the UI has
+ * not shown yet (video_ext_audio_notice_consume). */
+static int extEnabled, extNotice;
 /* Off by default: NUVIO_EXT_AUDIO=1 in the environment, or the file
  * /tmp/nuvio-ext-audio (the convention of /tmp/nuvio-dts-liberar), turns it on. */
 static int extFlag(void) {
@@ -2358,6 +2361,7 @@ int video_tocar(const char *url) {
   dvRecuado = 0;
   dtsTentou = 0; dtsRevisao = 0; dtsSaida[0] = 0; dtsNativePending = 0; dtsEstado = 0;
   extForget();   /* The other source belonged to the previous playback. */
+  extEnabled = extFlag();
   dtsHabilitado = dts_playback_enabled() && dtsLiberadoNestaTv();
   printf("[dts] fallback %s\n", dtsHabilitado ? "available" : "unavailable");
   dvSondado = dvMkvPerfil = dvAudios = 0; dtsModoDv = 0; dvAudioMkvOrd = -1; dvSegurar = 0;
@@ -3188,8 +3192,7 @@ static void bombearDts(void) {
   if (extLeft) {
     printf("[ext-audio] left: %.95s\n", st.ext_error[0] ? st.ext_error : st.error); fflush(stdout);
     extForget();
-    ilha_avisar("ext-audio", ILHA_ERRO, NULL,
-                "External audio failed. Back to this source's audio.", 8000u, 0);
+    extNotice = 1;
   }
   if (st.failed) {
     /* A fast startup failure can happen before the main thread sees its stages. */
@@ -3800,9 +3803,10 @@ void video_forcar_sdr(void) {
 void video_definir_dv(int dv) { dvPedido = dv ? 1 : 0; }
 
 int video_ext_audio_available(void) {
-  return extFlag() && urlAtual[0] && !modoLoad && (dtsSessao || dtsHabilitado);
+  return extEnabled && urlAtual[0] && !modoLoad && (dtsSessao || dtsHabilitado);
 }
 int video_ext_audio_active(void) { return extWanted; }
+int video_ext_audio_notice_consume(void) { int n = extNotice; extNotice = 0; return n; }
 int video_ext_audio_offset(void) { return extOffsetMs; }
 int video_ext_audio_set(const char *url, const char *headers) {
   if (!video_ext_audio_available() || !url || !*url || strlen(url) >= sizeof extUrl ||
