@@ -801,6 +801,12 @@ static int aac_direct(const AVCodecParameters *p) {
   int object=c[0]>>3, frequency=((c[0]&7)<<1)|(c[1]>>7), channels=(c[1]>>3)&15;
   return object==2 && frequency==3 && channels==2;
 }
+/* A track of another source the path can take: as it is in the file, or
+ * through a decoder this build has (DTS only on webOS). */
+static int ext_feedable(const AVCodecParameters *p) {
+  return p->codec_id==AV_CODEC_ID_AC3 || p->codec_id==AV_CODEC_ID_EAC3 || aac_direct(p) ||
+      avcodec_find_decoder(p->codec_id)!=NULL;
+}
 int dts_engine_available(void) {
   return avcodec_find_decoder(AV_CODEC_ID_DTS) && avcodec_find_encoder(AV_CODEC_ID_AAC) && av_bsf_get_by_name("h264_mp4toannexb")
       && av_bsf_get_by_name("hevc_mp4toannexb");
@@ -881,6 +887,7 @@ int dts_engine_open(DtsEngine *e,const char *url,const char *headers,int audio,i
   if(e->fmt->duration==AV_NOPTS_VALUE || e->fmt->duration<=0)
     return fail(e,"Finite VOD duration required",0);
   e->info.audio_stream=e->info.video_stream=-1;
+  int audio_tracks=0;
   for(unsigned i=0;i<e->fmt->nb_streams;i++) {
     AVStream *s=e->fmt->streams[i]; AVCodecParameters *p=s->codecpar;
     if(av_packet_side_data_get(p->coded_side_data,p->nb_coded_side_data,AV_PKT_DATA_ENCRYPTION_INIT_INFO)
@@ -889,9 +896,11 @@ int dts_engine_open(DtsEngine *e,const char *url,const char *headers,int audio,i
     if(e->role!=DTS_ENGINE_AUDIO_ONLY && p->codec_type==AVMEDIA_TYPE_VIDEO && e->info.video_stream<0 && !(s->disposition&AV_DISPOSITION_ATTACHED_PIC))
       e->info.video_stream=i;
     /* Dolby Vision path: AC-3/E-AC-3 go to the TV untouched (passthrough).
-     * External audio: the other source offers any audio track (its codec is
-     * judged below); the session source selects none. */
-    int selectable=e->role==DTS_ENGINE_AUDIO_ONLY?p->codec_type==AVMEDIA_TYPE_AUDIO
+     * External audio: the other source offers the exact track asked for (its
+     * codec is judged below) or, with none asked, its first track the path
+     * can feed; the session source selects none. */
+    if(e->role==DTS_ENGINE_AUDIO_ONLY && p->codec_type==AVMEDIA_TYPE_AUDIO) audio_tracks++;
+    int selectable=e->role==DTS_ENGINE_AUDIO_ONLY?p->codec_type==AVMEDIA_TYPE_AUDIO && (audio==(int)i || ext_feedable(p))
       :e->role==DTS_ENGINE_VIDEO_ONLY?0
       :(p->codec_id==AV_CODEC_ID_DTS || (e->dv && (p->codec_id==AV_CODEC_ID_AC3 || p->codec_id==AV_CODEC_ID_EAC3)));
     if(selectable && e->info.audio_stream<0 && (audio<0 || audio==(int)i)) e->info.audio_stream=i;
@@ -905,7 +914,8 @@ int dts_engine_open(DtsEngine *e,const char *url,const char *headers,int audio,i
     }
   }
   if(e->role==DTS_ENGINE_AUDIO_ONLY) {
-    if(e->info.audio_stream<0) return fail(e,"External audio track absent",0);
+    if(e->info.audio_stream<0)
+      return fail(e,audio<0 && audio_tracks?"External audio codec unsupported":"External audio track absent",0);
     /* Nothing but the selected track leaves the demuxer. */
     for(unsigned i=0;i<e->fmt->nb_streams;i++)
       if((int)i!=e->info.audio_stream) e->fmt->streams[i]->discard=AVDISCARD_ALL;

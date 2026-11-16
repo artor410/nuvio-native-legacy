@@ -48,3 +48,22 @@ for name in ('eac3','ac3','aac'):
     print(f'{name}: {len(got)} bytes identical to the track, {missing} trimmed at the start')
 PY
 echo 'External audio: exact passthrough of E-AC-3, AC-3 and AAC-LC from the other source passed.'
+# End to end: the real playback worker over the same files, native pipeline faked.
+${CC:-gcc} -std=gnu11 -Wall -Wextra -Werror -DNV_DTS_FFMPEG ${NV_TEST_DTS_RECOVERY_CFLAGS--DNV_DTS_WEBOS_RECOVERY} -I"$PREFIX/include" \
+  src/dts/dts_engine.c src/dts/dts_playback.c src/js.c src/linguas.c tests/dts_ext_e2e.c -o "$TMP/e2e" \
+  -L"$PREFIX/lib" -Wl,--start-group -lavformat -lavcodec -lswresample -lavutil -Wl,--end-group -lm -lpthread
+"$TMP/e2e" "$TMP/movie.mkv" "$TMP/dub.mkv" "$TMP"
+ffmpeg -hide_banner -loglevel error -i "$TMP/movie.mkv" -map 0:a:0 -c copy -f data "$TMP/movie-ac3.expected"
+python3 - "$TMP" <<'PY'
+import sys
+# What the pipeline was fed: the other source's E-AC-3 while external audio was
+# on, the movie's own AC-3 after the other source failed. Same start trim rule.
+for got_name,expected_name in (('e2e-dub.bin','eac3.expected'),('e2e-movie.bin','movie-ac3.expected')):
+    expected=open(f'{sys.argv[1]}/{expected_name}','rb').read()
+    got=open(f'{sys.argv[1]}/{got_name}','rb').read()
+    missing=len(expected)-len(got)
+    # The session ends with the movie, so the very last packet may be unfed too.
+    assert got and got in expected and 0<=missing<=4096,(got_name,len(expected),len(got))
+    print(f'{got_name}: {len(got)} bytes identical to {expected_name}, {missing} trimmed at the start')
+PY
+echo 'External audio end to end: the pipeline was fed the right source at every step.'

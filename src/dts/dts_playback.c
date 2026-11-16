@@ -196,9 +196,11 @@ static void extFail(DtsPlayback *p, const char *error, unsigned gen) {
   for (char *c = clean; *c; c++) if (*c == '"' || *c == '\\' || (unsigned char)*c < 32) *c = ' ';
   extClose(p);
   pthread_mutex_lock(&p->lock);
-  if (p->ext_gen == gen) p->ext_want = 0;
-  p->status.ext_audio = 0; p->status.ext_fallback = 1;
-  snprintf(p->status.ext_error, sizeof p->status.ext_error, "%s", clean);
+  p->status.ext_audio = 0;
+  if (p->ext_gen == gen) {
+    p->ext_want = 0; p->status.ext_fallback = 1;
+    snprintf(p->status.ext_error, sizeof p->status.ext_error, "%s", clean);
+  }
   pthread_mutex_unlock(&p->lock);
   printf("[ext-audio] back to the source's own audio: %s\n", clean); fflush(stdout);
   /* The status is what lasts: a reload that follows empties the event queue. */
@@ -240,15 +242,24 @@ static int extPrepare(DtsPlayback *p, double target, int reuse) {
   dts_engine_ahead_mib(e, DTS_EXT_AHEAD_MIB);
   dts_engine_dv(e, p->dv);
   nativeEvent(p, "{\"dtsStage\":{\"name\":\"ext-audio-open-requested\"}}");
+  /* With no exact track the engine takes the first one the path can feed. */
   int opened = dts_engine_open(e, url, headers, stream, 0, at) >= 0;
   if (opened && stream < 0 && language[0]) {
-    /* No exact track asked: the first one in the wanted language, if any. */
+    /* A language was asked: its first track that opens wins. One that does
+     * not (a codec the path cannot feed) is skipped, and with none left the
+     * engine's own choice stands. Each try reads the container header again. */
+    int wanted[DTS_TRACK_MAX], n = 0, chosen = dts_engine_info(e)->audio_stream, done = 0;
     const DtsMediaInfo *info = dts_engine_info(e);
-    int wanted = -1;
-    for (int i = 0; info && i < info->n_tracks && wanted < 0; i++)
+    for (int i = 0; i < info->n_tracks; i++)
       if (info->tracks[i].kind == DTS_AUDIO && info->tracks[i].language[0] &&
-          ling_casa(info->tracks[i].language, language)) wanted = info->tracks[i].stream_index;
-    if (wanted >= 0 && wanted != info->audio_stream) opened = dts_engine_open(e, url, headers, wanted, 0, at) >= 0;
+          ling_casa(info->tracks[i].language, language)) wanted[n++] = info->tracks[i].stream_index;
+    for (int i = 0; i < n && !done; i++) {
+      if (wanted[i] == chosen) { done = 1; break; }
+      if (stopped(p)) break;
+      if (dts_engine_open(e, url, headers, wanted[i], 0, at) >= 0) { chosen = wanted[i]; done = 1; }
+      else chosen = -1;
+    }
+    if (chosen < 0) opened = !stopped(p) && dts_engine_open(e, url, headers, -1, 0, at) >= 0;
   }
   memset(headers, 0, sizeof headers);
   if (!opened) {
@@ -412,6 +423,16 @@ typedef struct {
   double position, changed_at, full_since;
   int advanced;
 } DtsStall;
+/* External audio on the worker: the other source's pending packet, whether
+ * that source ended, where its last packet ended (continuity), and why it is
+ * about to be left, if so. A reload invalidates all but the reason. */
+typedef struct {
+  DtsFrame frame;
+  int have, eof;
+  int64_t end;
+  const char *why;
+} DtsExtFeed;
+static void resetExtFeed(DtsExtFeed *x) { x->have = x->eof = 0; x->end = INT64_MIN; }
 static void resetStall(DtsStall *stall, double position) {
   *stall = (DtsStall){.position = position, .changed_at = clockSeconds(CLOCK_MONOTONIC), .full_since = -1};
 }
@@ -471,12 +492,7 @@ static void *run(void *user) {
   double timestamp_anchor = position;
   int native_unhealthy = 0;
   int recovery_waiting = 0;
-  /* External audio: its pending packet, end of the other source, the end of
-   * its last packet (continuity) and why it is about to be left, if so. */
-  DtsFrame xframe;
-  int have_x = 0, ext_eof = 0;
-  int64_t x_end = INT64_MIN;
-  const char *ext_why = NULL;
+  DtsExtFeed x = {.end = INT64_MIN};
   resetStall(&stall, position);
   if (!prepare(p, stream, core, position)) goto done;
   /* With the audio elsewhere the session engine selected none: keep the
@@ -527,13 +543,13 @@ static void *run(void *user) {
       fail(p, DTS_PLAYBACK_STARVED);
       break;
     }
-    if (p->ext_active && p->ext_starved >= DTS_EXT_STARVED_WINDOWS) ext_why = "External audio source too slow";
-    if (ext_why) {
+    if (p->ext_active && p->ext_starved >= DTS_EXT_STARVED_WINDOWS) x.why = "External audio source too slow";
+    if (x.why) {
       /* The other source failed: same video, the session's own audio, from
        * the native presentation clock. A pending seek or track request does
        * the reload itself below, already without the other source. */
-      extFail(p, ext_why, p->ext_open_gen); ext_why = NULL;
-      have_x = ext_eof = 0; x_end = INT64_MIN;
+      extFail(p, x.why, p->ext_open_gen); x.why = NULL;
+      resetExtFeed(&x);
       if (!seek && !audio && !ext_change) {
         if (!prepare(p, stream, core, presented)) break;
         nativeEvent(p, "{\"dtsStage\":{\"name\":\"ext-audio-fallback\",\"detail\":\"reloaded with the source audio\"}}");
@@ -588,7 +604,7 @@ static void *run(void *user) {
       position = preroll = presented = target; complete = clock_seen = 0;
       fed_audio = fed_video = target;
       have_frame = eof = 0; seek_preroll = seek_reload; seek_audio = seek_video = 0;
-      have_x = ext_eof = 0; x_end = INT64_MIN;
+      resetExtFeed(&x);
       pause_dirty = volume_dirty = 1;
       resetStall(&stall, target);
       /* This instance follows a seek or proven stall. If it loads but never
@@ -607,7 +623,7 @@ static void *run(void *user) {
       position = preroll = presented = target; complete = clock_seen = 0;
       fed_audio = fed_video = target;
       have_frame = 0; eof = 0; pause_dirty = 1; volume_dirty = 1;
-      have_x = ext_eof = 0; x_end = INT64_MIN;
+      resetExtFeed(&x);
       cpu_window = clockSeconds(CLOCK_MONOTONIC); cpu_used = 0;
       resetStall(&stall, target);
       native_unhealthy = 0;
@@ -633,40 +649,40 @@ static void *run(void *user) {
     if (eof) { rest(p); continue; }
     /* External audio: two sources, one Feed at a time. Whichever stream is
      * behind goes next, so the pair stays interleaved by its own timestamps. */
-    int use_ext = p->ext_active && !ext_eof && fed_audio <= fed_video;
-    if (use_ext && !have_x) {
+    int use_ext = p->ext_active && !x.eof && fed_audio <= fed_video;
+    if (use_ext && !x.have) {
       double begun = clockSeconds(CLOCK_THREAD_CPUTIME_ID);
       double read_started = clockSeconds(CLOCK_MONOTONIC);
-      int r = dts_engine_next(p->ext_engine, &xframe);
+      int r = dts_engine_next(p->ext_engine, &x.frame);
       double ended = clockSeconds(CLOCK_THREAD_CPUTIME_ID);
       double now = clockSeconds(CLOCK_MONOTONIC);
       if (begun >= 0 && ended >= begun) { cpu_used += ended - begun; rate.decode_cpu += ended - begun; }
       if (read_started >= 0 && now >= read_started) rate.ext_wall += now - read_started;
       if (stopped(p)) break;
-      if (r < 0) { ext_why = dts_engine_error(p->ext_engine); continue; }
+      if (r < 0) { x.why = dts_engine_error(p->ext_engine); continue; }
       if (r == 0) {
         /* The other source is shorter: the video goes on without audio, and
          * the audio lead no longer holds the pacing back. */
-        ext_eof = 1; fed_audio = 9e9; continue;
+        x.eof = 1; fed_audio = 9e9; continue;
       }
-      if (xframe.kind != DTS_AUDIO || xframe.pts_ns == INT64_MIN) continue;
-      if (xframe.size > 2 * 1024 * 1024) { ext_why = "External audio packet exceeds playback memory budget"; continue; }
+      if (x.frame.kind != DTS_AUDIO || x.frame.pts_ns == INT64_MIN) continue;
+      if (x.frame.size > 2 * 1024 * 1024) { x.why = "External audio packet exceeds playback memory budget"; continue; }
       /* A source whose audio clock jumps cannot keep one constant offset. */
-      if (x_end != INT64_MIN && (xframe.pts_ns < x_end - INT64_C(500000000) ||
-                                 xframe.pts_ns > x_end + INT64_C(5000000000))) {
-        ext_why = "External audio timestamp discontinuity"; continue;
+      if (x.end != INT64_MIN && (x.frame.pts_ns < x.end - INT64_C(500000000) ||
+                                 x.frame.pts_ns > x.end + INT64_C(5000000000))) {
+        x.why = "External audio timestamp discontinuity"; continue;
       }
-      x_end = xframe.pts_ns + (xframe.duration_ns > 0 ? xframe.duration_ns : 0);
+      x.end = x.frame.pts_ns + (x.frame.duration_ns > 0 ? x.frame.duration_ns : 0);
       if (now >= 0 && cpu_window >= 0 && now - cpu_window >= 5.0) {
         int overrun = cpu_used > (now - cpu_window) * 0.80;
         cpu_window = now; cpu_used = 0;
-        if (overrun) { ext_why = "External audio conversion exceeds the sustained CPU budget"; continue; }
+        if (overrun) { x.why = "External audio conversion exceeds the sustained CPU budget"; continue; }
       }
       /* Positive offset delays the audio. Nothing is fed before time zero. */
-      xframe.pts_ns += p->ext_offset_ns;
-      if (xframe.dts_ns != INT64_MIN) xframe.dts_ns += p->ext_offset_ns;
-      if (xframe.pts_ns < 0) continue;
-      have_x = 1;
+      x.frame.pts_ns += p->ext_offset_ns;
+      if (x.frame.dts_ns != INT64_MIN) x.frame.dts_ns += p->ext_offset_ns;
+      if (x.frame.pts_ns < 0) continue;
+      x.have = 1;
     }
     if (!use_ext && !have_frame) {
       double begun = clockSeconds(CLOCK_THREAD_CPUTIME_ID);
@@ -714,7 +730,7 @@ static void *run(void *user) {
         nativeEvent(p, event);
         position = fed_audio = fed_video = target;
         have_frame = eof = seek_preroll = seek_audio = seek_video = 0;
-        have_x = ext_eof = 0; x_end = INT64_MIN;
+        resetExtFeed(&x);
         resetStall(&stall, target);
         recovery_waiting = stall.advanced = 1;
         native_unhealthy = 0; p->starved = 0;
@@ -730,14 +746,14 @@ static void *run(void *user) {
       if (now >= 0 && now - cpu_window >= 5.0) { cpu_window = now; cpu_used = 0; }
       if (cpu_overrun && p->ext_active) {
         /* The session engine converts nothing here: the load is the other source's. */
-        ext_why = "External audio conversion exceeds the sustained CPU budget";
+        x.why = "External audio conversion exceeds the sustained CPU budget";
         continue;
       }
       if (decode_error || encoder_error || cpu_overrun) {
         pthread_mutex_lock(&p->lock); presented = p->presented; pthread_mutex_unlock(&p->lock);
         if (recover(p, &core, &core_tried, stream, presented, decode_error || cpu_overrun)) {
           seek_preroll = 0;
-          have_x = ext_eof = 0; x_end = INT64_MIN;
+          resetExtFeed(&x);
           position = presented; have_frame = 0; eof = 0;
           fed_audio = fed_video = presented;
           cpu_window = clockSeconds(CLOCK_MONOTONIC); cpu_used = 0;
@@ -808,7 +824,7 @@ static void *run(void *user) {
         if (!pause && (clock_seen || recovery_waiting) && stall.full_since < 0) stall.full_since = clockSeconds(CLOCK_MONOTONIC);
         rate.paced++; rest(p); continue;
       }
-      const DtsFrame *out = use_ext ? &xframe : &frame;
+      const DtsFrame *out = use_ext ? &x.frame : &frame;
       double feed_started = clockSeconds(CLOCK_MONOTONIC);
       int r = dts_pipeline_feed(p->pipeline, out);
       double feed_ended = clockSeconds(CLOCK_MONOTONIC);
@@ -827,7 +843,7 @@ static void *run(void *user) {
         }
         if (out->kind == DTS_AUDIO) { rate.audio++; if (position > fed_audio) fed_audio = position; }
         else { rate.video++; if (position > fed_video) fed_video = position; }
-        if (use_ext) have_x = 0; else have_frame = 0;
+        if (use_ext) x.have = 0; else have_frame = 0;
       } else {
         rate.full++;
         if (!pause && (recovery_waiting || (complete && clock_seen && !seek_preroll)) && stall.full_since < 0)

@@ -670,6 +670,9 @@ static int extWanted, extStart, extOffsetMs;
 /* The flag as read when this playback started; the failure note the UI has
  * not shown yet (video_ext_audio_notice_consume). */
 static int extEnabled, extNotice;
+/* The fed session in place was opened because external audio asked for it:
+ * its end is not a failed DTS conversion of this source. */
+static int extOpened;
 /* Off by default: NUVIO_EXT_AUDIO=1 in the environment, or the file
  * /tmp/nuvio-ext-audio (the convention of /tmp/nuvio-dts-liberar), turns it on. */
 static int extFlag(void) {
@@ -685,6 +688,12 @@ static DtsExtAudio extRequest(void) {
 static void extForget(void) {
   extWanted = extStart = 0; extUrl[0] = 0;
   memset(extHeaders, 0, sizeof extHeaders);
+}
+/* The fed pipeline could not even start for external audio: the TV player
+ * keeps this source; say why the choice did nothing. */
+static void extStartFailed(void) {
+  if (!extWanted) return;
+  extForget(); extNotice = 1; dtsEstado = 0;
 }
 static void bombearDts(void);
 static int dtsLiberadoNestaTv(void);
@@ -2361,6 +2370,7 @@ int video_tocar(const char *url) {
   dvRecuado = 0;
   dtsTentou = 0; dtsRevisao = 0; dtsSaida[0] = 0; dtsNativePending = 0; dtsEstado = 0;
   extForget();   /* The other source belonged to the previous playback. */
+  extOpened = 0;
   extEnabled = extFlag();
   dtsHabilitado = dts_playback_enabled() && dtsLiberadoNestaTv();
   printf("[dts] fallback %s\n", dtsHabilitado ? "available" : "unavailable");
@@ -2411,12 +2421,18 @@ void video_bombear(void) {
   mkvRetryBombear();
   acbBindRecolher();
   if (ligado) acbConfigurarTipo(dtsSessao != NULL);
+  /* Another path closed the fed session (reconnection, a reload to the TV
+   * player): the other source went with it. */
+  if (extWanted && !dtsSessao && !extStart) extForget();
   if (dtsSessao) bombearDts();
   else if (extStart && urlAtual[0] && !modoLoad) {
     /* External audio asked while the TV player plays: open the fed pipeline.
-     * A Dolby Vision file keeps its Dolby Vision where this TV has that path.
+     * A Dolby Vision file keeps its Dolby Vision where this TV has that path
+     * and nothing but its audio kept it out (a refusal by the person, a slow
+     * source or a failed path stays refused).
      * iniciarDts clears extStart unless an old bind makes it wait a pump. */
-    dtsModoDv = dvLiberadoNestaTv() && dvSondado && dvMkvPerfil &&
+    dtsModoDv = (dvNao == VIDEO_DV_NAO_NADA || dvNao == VIDEO_DV_NAO_AUDIO) &&
+                dvLiberadoNestaTv() && dvSondado && dvMkvPerfil &&
                 nv_dv7_profile(dvMkvPerfil, dvMkvEl, dvMkvBl, dvMkvRpu) &&
                 nv_dv7_selected(dvMkvPerfil, ajustes_dv_mkv(), ajustes_dv7());
     iniciarDts(-1);
@@ -3110,8 +3126,7 @@ static int iniciarDts(int stream) {
     marco("DTS startup failed: MSE video plane initialization");
     dvCaminhoNaoAbriu();
     dtsVoltarNativo("video plane");
-    /* Asked only for external audio: say so, and no "conversion failed". */
-    if (extWanted) { extForget(); extNotice = 1; dtsEstado = 0; }
+    extStartFailed();
     return 0;
   }
   dtsMarcarAbertas(dtsAbertasSemFechar() + 1);
@@ -3119,19 +3134,21 @@ static int iniciarDts(int stream) {
   dts_engine_set_ahead_mib(cacheboost_backend_buffer_mb());   // #338: Settings > Buffer size
   dts_playback_next_dv(dtsModoDv);
   dts_playback_next_p7(ajustes_dv7());
+  extOpened = extWanted;
   if (extWanted) {
     DtsExtAudio ext = extRequest();
     dtsSessao = dts_playback_start_ext(urlAtual, cabsHttp, stream, alvo, paused, expWin, 0,
                                        (a || trocada) ? &selected : NULL, ordinal, count, &ext);
-  } else
-  dtsSessao = dts_playback_start(urlAtual, cabsHttp, stream, alvo,
-                               paused, expWin, 0, (a || trocada) ? &selected : NULL, ordinal, count);
+  } else {
+    dtsSessao = dts_playback_start(urlAtual, cabsHttp, stream, alvo,
+                                 paused, expWin, 0, (a || trocada) ? &selected : NULL, ordinal, count);
+  }
   if (!dtsSessao) {
     dtsMarcarAbertas(0);
     marco("DTS startup failed: software playback unavailable");
     dvCaminhoNaoAbriu();
     dtsVoltarNativo("converter unavailable");
-    if (extWanted) { extForget(); extNotice = 1; dtsEstado = 0; }
+    extStartFailed();
     return 0;
   }
   if (extWanted && !dtsModoDv) {
@@ -3190,8 +3207,11 @@ static void bombearDts(void) {
   dts_playback_status(dtsSessao, &st);
   /* The other source failed: the worker already plays this source's own audio
    * (or is about to fail below, when it has none the path can feed). */
-  int extLeft = extWanted && (st.ext_fallback || st.failed);
-  if (extLeft) {
+  if (extWanted && st.failed && !st.ext_fallback && !extOpened) {
+    /* A session that was there before fails for a reason of its own, and says
+     * so through its own notices. */
+    extForget();
+  } else if (extWanted && (st.ext_fallback || st.failed)) {
     printf("[ext-audio] left: %.95s\n", st.ext_error[0] ? st.ext_error : st.error); fflush(stdout);
     extForget();
     extNotice = 1;
@@ -3214,7 +3234,7 @@ static void bombearDts(void) {
     }
     dtsVoltarNativo("converter");
     /* The TV player has this source's sound; no "conversion failed" state. */
-    if (extLeft) dtsEstado = 0;
+    if (extOpened) dtsEstado = 0;
     return;
   }
   /* Load may synchronously queue videoInfo/playing before the worker publishes
@@ -3304,8 +3324,7 @@ static void bombearDts(void) {
     if (st.ext_audio) {
       if (audioAtual >= nAudio) audioAtual = 0;
       dtsSaida[0] = 0; dtsEstado = 0;
-    } else
-    if (!dtsModoDv || (audioAtual >= 0 && audioAtual < nAudio && !strcmp(faixaAudio[audioAtual].codec, "dts"))) {
+    } else if (!dtsModoDv || (audioAtual >= 0 && audioAtual < nAudio && !strcmp(faixaAudio[audioAtual].codec, "dts"))) {
       snprintf(dtsSaida, sizeof dtsSaida, "%s", !strcmp(st.info.audio_codec, "ac3") ? "DTS → AC3 5.1" : "DTS → AAC Stereo");
       dtsEstado = VIDEO_DTS_CONVERTIDO;
     } else { dtsSaida[0] = 0; dtsEstado = 0; }
@@ -3807,7 +3826,7 @@ void video_definir_dv(int dv) { dvPedido = dv ? 1 : 0; }
 int video_ext_audio_available(void) {
   return extEnabled && urlAtual[0] && !modoLoad && (dtsSessao || dtsHabilitado);
 }
-int video_ext_audio_active(void) { return extWanted; }
+int video_ext_audio_active(void) { return extWanted && (dtsSessao || extStart); }
 int video_ext_audio_notice_consume(void) { int n = extNotice; extNotice = 0; return n; }
 int video_ext_audio_offset(void) { return extOffsetMs; }
 int video_ext_audio_set(const char *url, const char *headers) {

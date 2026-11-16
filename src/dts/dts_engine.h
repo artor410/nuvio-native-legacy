@@ -51,9 +51,10 @@ void dts_engine_allow_p7(DtsEngine *, int enabled);
  * default and unchanged: video plus the selected audio track of one file.
  * VIDEO_ONLY: the audio comes from another source, so no audio track is
  * required or delivered. AUDIO_ONLY: that other source; only the selected
- * audio track leaves (audio_stream -1 = the first one), never video or
- * subtitles. AC-3/E-AC-3 and stereo 48 kHz AAC-LC pass through undecoded; DTS
- * uses the existing conversion; any other codec fails the open. */
+ * audio track leaves (audio_stream -1 = the first one the path can feed),
+ * never video or subtitles. AC-3/E-AC-3 and stereo 48 kHz AAC-LC pass through
+ * undecoded; a codec this FFmpeg build can decode (DTS only on webOS) uses the
+ * existing conversion; any other codec fails the open. */
 enum { DTS_ENGINE_AV = 0, DTS_ENGINE_VIDEO_ONLY = 1, DTS_ENGINE_AUDIO_ONLY = 2 };
 void dts_engine_role(DtsEngine *, int role);
 /* Read-ahead of THIS engine for its next open, in MiB of 1 MiB ranges (1..64).
