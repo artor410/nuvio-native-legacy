@@ -37,6 +37,8 @@ DtsEngine *dts_engine_create(void) { return calloc(1, sizeof(DtsEngine)); }
 int dts_engine_available(void) { return 0; }
 void dts_engine_dv(DtsEngine *e, int enabled) { (void)e; (void)enabled; }
 void dts_engine_allow_p7(DtsEngine *e, int enabled) { (void)e; (void)enabled; }
+void dts_engine_role(DtsEngine *e, int role) { (void)e; (void)role; }
+void dts_engine_ahead_mib(DtsEngine *e, int mib) { (void)e; (void)mib; }
 void dts_engine_metrics(DtsEngine *e,DtsEngineMetrics *out) { (void)e; if(out) memset(out,0,sizeof(*out)); }
 int dts_engine_open(DtsEngine *e,const char *u,const char *h,int a,int c,double s) {
   (void)e;(void)u;(void)h;(void)a;(void)c;(void)s; return -1;
@@ -108,6 +110,9 @@ struct DtsEngine {
   int64_t range_next;
   long range_bytes;
   int dv, passthrough, range_slots, final_cross, opening;
+  /* External audio (dts_engine_role, dts_engine_ahead_mib): which half of a
+   * two-source session this engine is, and its own read-ahead. 0 = as before. */
+  int role, ahead_mib;
   int source_stream; /* Native HTTP cache; conversion readers retain their behavior. */
   volatile int source_cancel;
   /* Samsung remux (dts_engine_open_demux): container only, large ranges and
@@ -782,6 +787,20 @@ int64_t dts_engine_source_total(DtsEngine *e) {
 }
 void dts_engine_dv(DtsEngine *e, int enabled) { if (e) e->dv = !!enabled; }
 void dts_engine_allow_p7(DtsEngine *e, int enabled) { if (e) e->allow_p7 = !!enabled; }
+void dts_engine_role(DtsEngine *e, int role) {
+  if (e) e->role = role == DTS_ENGINE_VIDEO_ONLY || role == DTS_ENGINE_AUDIO_ONLY ? role : DTS_ENGINE_AV;
+}
+void dts_engine_ahead_mib(DtsEngine *e, int mib) {
+  if (e) e->ahead_mib = mib > 0 && mib <= RANGE_SLOTS_MAX ? mib : 0;
+}
+/* Raw AAC the native pipeline can be told about: LC, 48 kHz, stereo, read
+ * from the AudioSpecificConfig (the container profile is often unknown). */
+static int aac_direct(const AVCodecParameters *p) {
+  if(p->codec_id!=AV_CODEC_ID_AAC || p->extradata_size<2 || !p->extradata) return 0;
+  const uint8_t *c=p->extradata;
+  int object=c[0]>>3, frequency=((c[0]&7)<<1)|(c[1]>>7), channels=(c[1]>>3)&15;
+  return object==2 && frequency==3 && channels==2;
+}
 int dts_engine_available(void) {
   return avcodec_find_decoder(AV_CODEC_ID_DTS) && avcodec_find_encoder(AV_CODEC_ID_AAC) && av_bsf_get_by_name("h264_mp4toannexb")
       && av_bsf_get_by_name("hevc_mp4toannexb");
@@ -832,6 +851,8 @@ int dts_engine_open(DtsEngine *e,const char *url,const char *headers,int audio,i
   e->pos=0; e->total=-1; e->cache_size=0; e->has_core=0;
   e->range_bytes=e->dv?RANGE_BYTES_DV:RANGE_BYTES; e->range_slots=e->dv?RANGE_SLOTS_DV:RANGE_SLOTS;
   if(g_ahead_mib>0) { e->range_bytes=RANGE_BYTES_DV; e->range_slots=(g_ahead_mib+3)/4; }
+  /* This engine's own read-ahead wins over both: 1 MiB ranges, ahead_mib of them. */
+  if(e->ahead_mib>0) { e->range_bytes=RANGE_BYTES; e->range_slots=e->ahead_mib; }
   e->final_url[0]=0; e->final_cross=0; e->passthrough=0; e->remux=0; e->opening=1;
   e->demux_eof=e->decoder_eof=e->resampler_eof=e->encoder_sent_eof=e->timeline=0;
   if (cancelled(e)) return fail(e,"Cancelled",0);
@@ -865,11 +886,15 @@ int dts_engine_open(DtsEngine *e,const char *url,const char *headers,int audio,i
     if(av_packet_side_data_get(p->coded_side_data,p->nb_coded_side_data,AV_PKT_DATA_ENCRYPTION_INIT_INFO)
        || p->codec_tag==MKTAG('e','n','c','a') || p->codec_tag==MKTAG('e','n','c','v'))
       return fail(e,"Encrypted media is unsupported",0);
-    if(p->codec_type==AVMEDIA_TYPE_VIDEO && e->info.video_stream<0 && !(s->disposition&AV_DISPOSITION_ATTACHED_PIC))
+    if(e->role!=DTS_ENGINE_AUDIO_ONLY && p->codec_type==AVMEDIA_TYPE_VIDEO && e->info.video_stream<0 && !(s->disposition&AV_DISPOSITION_ATTACHED_PIC))
       e->info.video_stream=i;
-    /* Dolby Vision path: AC-3/E-AC-3 go to the TV untouched (passthrough). */
-    if((p->codec_id==AV_CODEC_ID_DTS || (e->dv && (p->codec_id==AV_CODEC_ID_AC3 || p->codec_id==AV_CODEC_ID_EAC3)))
-       && e->info.audio_stream<0 && (audio<0 || audio==(int)i)) e->info.audio_stream=i;
+    /* Dolby Vision path: AC-3/E-AC-3 go to the TV untouched (passthrough).
+     * External audio: the other source offers any audio track (its codec is
+     * judged below); the session source selects none. */
+    int selectable=e->role==DTS_ENGINE_AUDIO_ONLY?p->codec_type==AVMEDIA_TYPE_AUDIO
+      :e->role==DTS_ENGINE_VIDEO_ONLY?0
+      :(p->codec_id==AV_CODEC_ID_DTS || (e->dv && (p->codec_id==AV_CODEC_ID_AC3 || p->codec_id==AV_CODEC_ID_EAC3)));
+    if(selectable && e->info.audio_stream<0 && (audio<0 || audio==(int)i)) e->info.audio_stream=i;
     int kind=p->codec_type==AVMEDIA_TYPE_VIDEO?DTS_VIDEO:p->codec_type==AVMEDIA_TYPE_AUDIO?DTS_AUDIO:p->codec_type==AVMEDIA_TYPE_SUBTITLE?DTS_SUBTITLE:0;
     if(kind && e->info.n_tracks<DTS_TRACK_MAX) {
       DtsTrack *t=&e->info.tracks[e->info.n_tracks++]; t->kind=kind; t->stream_index=i; t->stream_id=s->id;
@@ -879,7 +904,15 @@ int dts_engine_open(DtsEngine *e,const char *url,const char *headers,int audio,i
       copy_metadata(t->title,sizeof(t->title),s->metadata,"title");
     }
   }
-  if(e->info.audio_stream<0 || e->info.video_stream<0) return fail(e,"Selected DTS track or video absent",0);
+  if(e->role==DTS_ENGINE_AUDIO_ONLY) {
+    if(e->info.audio_stream<0) return fail(e,"External audio track absent",0);
+    /* Nothing but the selected track leaves the demuxer. */
+    for(unsigned i=0;i<e->fmt->nb_streams;i++)
+      if((int)i!=e->info.audio_stream) e->fmt->streams[i]->discard=AVDISCARD_ALL;
+  } else if(e->info.video_stream<0 || (e->role==DTS_ENGINE_AV && e->info.audio_stream<0))
+    return fail(e,"Selected DTS track or video absent",0);
+  /* The video half, unchanged; the other source of external audio has none. */
+  if(e->role!=DTS_ENGINE_AUDIO_ONLY) {
   AVStream *v=e->fmt->streams[e->info.video_stream]; AVCodecParameters *vp=v->codecpar;
   const char *filter=vp->codec_id==AV_CODEC_ID_H264?"h264_mp4toannexb":vp->codec_id==AV_CODEC_ID_HEVC?"hevc_mp4toannexb":NULL;
   if(!filter && vp->codec_id!=AV_CODEC_ID_VP9 && vp->codec_id!=AV_CODEC_ID_AV1)
@@ -917,8 +950,27 @@ int dts_engine_open(DtsEngine *e,const char *url,const char *headers,int audio,i
     avcodec_parameters_copy(e->bsf->par_in,vp); e->bsf->time_base_in=v->time_base;
     if((r=av_bsf_init(e->bsf))<0) return fail(e,"Video filter open",r);
   }
+  }
+  if(e->role==DTS_ENGINE_VIDEO_ONLY) {
+    /* Audio from another source: demux only, and no audio packet is built. */
+    for(unsigned i=0;i<e->fmt->nb_streams;i++)
+      if(e->fmt->streams[i]->codecpar->codec_type==AVMEDIA_TYPE_AUDIO) e->fmt->streams[i]->discard=AVDISCARD_ALL;
+    e->passthrough=1;
+    e->in=av_packet_alloc(); e->out=av_packet_alloc();
+    if(!e->in || !e->out) return fail(e,"Audio queue allocation",0);
+    e->info.duration_ns=e->fmt->duration==AV_NOPTS_VALUE?0:av_rescale_q(e->fmt->duration,AV_TIME_BASE_Q,NS);
+    e->info.start_ns=e->fmt->start_time==AV_NOPTS_VALUE?0:av_rescale_q(e->fmt->start_time,AV_TIME_BASE_Q,NS);
+    e->target_ns=(int64_t)(start*1000000000.0);
+    return start>0?dts_engine_seek(e,start):0;
+  }
   AVCodecParameters *ap=e->fmt->streams[e->info.audio_stream]->codecpar;
   e->passthrough=ap->codec_id!=AV_CODEC_ID_DTS;
+  if(e->role==DTS_ENGINE_AUDIO_ONLY) {
+    /* What the native pipeline can be told about leaves as it is in the file;
+     * the rest needs a decoder this build has (DTS on webOS), or is refused. */
+    e->passthrough=ap->codec_id==AV_CODEC_ID_AC3 || ap->codec_id==AV_CODEC_ID_EAC3 || aac_direct(ap);
+    if(!e->passthrough && !avcodec_find_decoder(ap->codec_id)) return fail(e,"External audio codec unsupported",0);
+  }
   if(e->passthrough) {
     e->in=av_packet_alloc(); e->out=av_packet_alloc();
     if(!e->in || !e->out) return fail(e,"Audio queue allocation",0);
@@ -930,7 +982,7 @@ int dts_engine_open(DtsEngine *e,const char *url,const char *headers,int audio,i
     e->target_ns=(int64_t)(start*1000000000.0);
     return start>0?dts_engine_seek(e,start):0;
   }
-  const AVCodec *decoder=avcodec_find_decoder(AV_CODEC_ID_DTS);
+  const AVCodec *decoder=avcodec_find_decoder(e->role==DTS_ENGINE_AUDIO_ONLY?ap->codec_id:AV_CODEC_ID_DTS);
   if(!decoder) return fail(e,"DTS decoder absent",0);
   e->dec=avcodec_alloc_context3(decoder);
   if(!e->dec) return fail(e,"DTS decoder allocation",0);
@@ -1145,7 +1197,7 @@ static int next_frame_passthrough(DtsEngine *e,DtsFrame *f) {
     if(r<0) return fail(e,"Container read",r);
     if(av_packet_get_side_data(e->in,AV_PKT_DATA_ENCRYPTION_INFO,NULL)) { av_packet_unref(e->in); return fail(e,"Encrypted packet unsupported",0); }
     AVRational tb=e->fmt->streams[e->in->stream_index]->time_base;
-    if(e->fmt->streams[e->in->stream_index]->codecpar->codec_type==AVMEDIA_TYPE_SUBTITLE) {
+    if(e->role!=DTS_ENGINE_AUDIO_ONLY && e->fmt->streams[e->in->stream_index]->codecpar->codec_type==AVMEDIA_TYPE_SUBTITLE) {
       av_packet_move_ref(e->out,e->in);
       return frame_out(e,f,DTS_SUBTITLE,tb);
     }
@@ -1210,7 +1262,7 @@ static int next_frame(DtsEngine *e,DtsFrame *f) {
     }
     if(r<0) return fail(e,"Container read",r);
     if(av_packet_get_side_data(e->in,AV_PKT_DATA_ENCRYPTION_INFO,NULL)) { av_packet_unref(e->in); return fail(e,"Encrypted packet unsupported",0); }
-    if(e->fmt->streams[e->in->stream_index]->codecpar->codec_type==AVMEDIA_TYPE_SUBTITLE) {
+    if(e->role!=DTS_ENGINE_AUDIO_ONLY && e->fmt->streams[e->in->stream_index]->codecpar->codec_type==AVMEDIA_TYPE_SUBTITLE) {
       AVRational tb=e->fmt->streams[e->in->stream_index]->time_base;
       av_packet_move_ref(e->out,e->in);
       return frame_out(e,f,DTS_SUBTITLE,tb);

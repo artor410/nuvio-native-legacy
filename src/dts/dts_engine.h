@@ -47,6 +47,18 @@ int dts_engine_available(void);
 void dts_engine_dv(DtsEngine *, int enabled);
 /* Explicit opt-in before open: P7 conversion and webOS recovery. Default off. */
 void dts_engine_allow_p7(DtsEngine *, int enabled);
+/* Role, set before open (docs/features/external-audio). DTS_ENGINE_AV is the
+ * default and unchanged: video plus the selected audio track of one file.
+ * VIDEO_ONLY: the audio comes from another source, so no audio track is
+ * required or delivered. AUDIO_ONLY: that other source; only the selected
+ * audio track leaves (audio_stream -1 = the first one), never video or
+ * subtitles. AC-3/E-AC-3 and stereo 48 kHz AAC-LC pass through undecoded; DTS
+ * uses the existing conversion; any other codec fails the open. */
+enum { DTS_ENGINE_AV = 0, DTS_ENGINE_VIDEO_ONLY = 1, DTS_ENGINE_AUDIO_ONLY = 2 };
+void dts_engine_role(DtsEngine *, int role);
+/* Read-ahead of THIS engine for its next open, in MiB of 1 MiB ranges (1..64).
+ * 0 (default) follows dts_engine_set_ahead_mib and the built-in sizes. */
+void dts_engine_ahead_mib(DtsEngine *, int mib);
 /* Open and seek return 0 on success, negative on error. */
 int dts_engine_open(DtsEngine *, const char *url, const char *headers,
                     int audio_stream, int core_only, double start_seconds);
