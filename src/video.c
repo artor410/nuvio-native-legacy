@@ -3110,6 +3110,8 @@ static int iniciarDts(int stream) {
     marco("DTS startup failed: MSE video plane initialization");
     dvCaminhoNaoAbriu();
     dtsVoltarNativo("video plane");
+    /* Asked only for external audio: say so, and no "conversion failed". */
+    if (extWanted) { extForget(); extNotice = 1; dtsEstado = 0; }
     return 0;
   }
   dtsMarcarAbertas(dtsAbertasSemFechar() + 1);
@@ -3128,8 +3130,8 @@ static int iniciarDts(int stream) {
     dtsMarcarAbertas(0);
     marco("DTS startup failed: software playback unavailable");
     dvCaminhoNaoAbriu();
-    extForget();
     dtsVoltarNativo("converter unavailable");
+    if (extWanted) { extForget(); extNotice = 1; dtsEstado = 0; }
     return 0;
   }
   if (extWanted && !dtsModoDv) {

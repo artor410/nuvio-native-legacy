@@ -68,6 +68,9 @@ static int toqueAudioRolar(const PonteiroRolagem *e) {
 // escolhida ali) e lida pelo tratamento de tecla, que roda antes.
 static int visiveis = 8;
 static void ajustarRolagem(void);
+#ifdef FX_EXT
+static void extAbrir(void);   // external audio rows, defined with them below
+#endif
 static float anim;
 // 0..1: a folha de legenda virando a BARRA DE ESTILO no topo (barra_desenhar).
 static float animTopo;
@@ -507,9 +510,7 @@ void faixas_abrir_em(int col) {
   volFoco = 0; velFoco = 0;
   foco[0] = video_audio_atual();
 #ifdef FX_EXT
-  // Opens on the tracks; with external audio on, on its row.
-  extPick = 0;
-  if (extOn() && video_ext_audio_active()) foco[0] = video_n_audio();
+  extAbrir();
 #endif
   // A legenda pode estar desligada (-1); a primeira linha da coluna e sempre
   // "Desativada", entao o indice da lista e deslocado em um.
@@ -669,6 +670,11 @@ static int extTecla(SDL_Keycode k, int rep) {
     if (ok) { aberta = 0; return 1; }
   }
   return 0;
+}
+// The sheet opens on the tracks; with external audio on, on its row.
+static void extAbrir(void) {
+  extPick = 0;
+  if (extOn() && video_ext_audio_active()) foco[0] = video_n_audio();
 }
 static void extAtualizar(Uint32 agora) {
   if (extOffPending && (!aberta || agora - extOffAt >= FX_EXT_APPLY_MS)) {

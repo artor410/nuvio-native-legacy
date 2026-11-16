@@ -26,7 +26,8 @@ video, through the same hardware path as the DTS fallback / Dolby Vision in MKV.
 | `src/dts/dts_playback.h/.c` | `DtsExtAudio`, `dts_playback_start_ext`, `dts_playback_ext_audio`, `dts_playback_ext_offset`; second engine on the single worker; offset; seek of both sources; fallback to A's audio; state in `DtsPlaybackStatus`. |
 | `src/video.h/.c` | `video_ext_audio*`: on/off, offset, fallback notice. |
 | `src/faixas.c` | "Audio from another source..." row in the audio sheet, list of the other resolved sources, offset row (50 ms steps). |
-| `src/ajustes.h/.c` | Device-local option, off by default, modeled on `AJ_DV7`. |
+| Flag | `/tmp/nuvio-ext-audio` or `NUVIO_EXT_AUDIO=1`, read in `video.c`. A Settings option modeled on `AJ_DV7` was the first idea; it touches the sync tables, four settings tests and 30 language files, so it waits for the path to be proven on a TV. |
+| `.github/workflows/external-audio.yml` | Runs the host tests of this branch. |
 | `tests/dts_ext_audio.c/.sh` | Real worker, fake engines: audio comes from B, offset, seek, fallback. |
 | `tests/dts_ext_engine.c/.sh` | Real engine with small synthetic MKVs (ffmpeg): roles, AC-3 passthrough, seek, unsupported codec. |
 | `docs/features/external-audio/README.md` | Requirements, limits, how to test on the TV. |

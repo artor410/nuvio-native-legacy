@@ -51,7 +51,9 @@ static int drain(DtsEngine *e,int kind,int stream,const char *outdir,const char 
   while((r=dts_engine_next(e,&f))>0) {
     assert(f.kind==kind && f.size>0);
     if(kind==DTS_AUDIO) {
-      assert(f.stream_index==stream && f.pts_ns>=last); last=f.pts_ns;
+      assert(f.stream_index==stream && f.pts_ns>=last);
+      if(last==INT64_MIN) printf("%s first packet: pts=%lld ns duration=%lld ns size=%u\n",name?name:"-",(long long)f.pts_ns,(long long)f.duration_ns,(unsigned)f.size);
+      last=f.pts_ns;
       if(out) assert(fwrite(f.data,1,f.size,out)==f.size);
     }
     count++;

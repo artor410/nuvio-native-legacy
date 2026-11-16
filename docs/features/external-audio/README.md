@@ -12,13 +12,46 @@ separate streams into LG's hardware pipeline, the same path as the
 |---|---|
 | Engine (`src/dts/dts_engine.*`): video-only and audio-only roles, per-engine read-ahead | Done, host-tested |
 | Playback worker (`src/dts/dts_playback.*`): second engine, offset, seek, fallback | Done, host-tested |
-| App wiring (`src/video.c`), audio sheet row (`src/faixas.c`), on/off flag | **Not written yet** |
+| App wiring (`src/video.c`): start, offset, failure note | Done, compiled and linked on the host; never run |
+| Audio sheet rows (`src/faixas.c`) | Done, compiled on the host; never drawn or driven |
 | Behavior on a TV | **Not validated** |
 
-Nothing calls the new entry points yet, so the feature is off and existing
-sessions are unchanged: `dts_playback_start` is `dts_playback_start_ext` with
-no external audio, and an engine nobody configures keeps the default role and
-read-ahead. See [PLANO.md](PLANO.md) for the plan and the remaining steps.
+The feature is off unless the flag below is set. With it off nothing new is
+reachable: `dts_playback_start` is `dts_playback_start_ext` with no external
+audio, and an engine nobody configures keeps the default role and read-ahead.
+See [PLANO.md](PLANO.md) for the plan.
+
+## Turning it on
+
+Off by default. Either of these, read when a playback starts:
+
+- the file `/tmp/nuvio-ext-audio` on the TV (`touch /tmp/nuvio-ext-audio` over
+  SSH; same convention as `/tmp/nuvio-dts-liberar`; gone after a reboot), or
+- `NUVIO_EXT_AUDIO=1` in the app's environment.
+
+There is no Settings option yet: adding one touches the settings sync tables,
+four of their tests and every language file, and is better done once the path
+is proven on a TV. It also needs the DTS fallback to be available on the TV
+(`[dts] fallback available` in the log), a film or episode (not live TV), and
+another direct HTTP source in the title's source list.
+
+## Using it
+
+Open the audio sheet during playback. After the source's own tracks:
+
+- **Audio from another source...**: OK lists the other sources already
+  resolved for the title (torrent-only sources are left out). OK on one starts
+  it; Back returns to the tracks. The track taken from that source is the first
+  one in the preferred audio language (Settings), else its first audio track.
+- **External audio: on**: OK turns it off and returns to the source's audio.
+- **Audio offset**: LEFT/RIGHT, 50 ms a press, 100 ms while the key repeats.
+  Applied 0.7 s after the last press (it reloads the pipeline).
+
+If the TV player was the one playing, choosing a source opens the fed pipeline
+(a short reload). Choosing one of the source's own tracks leaves external
+audio. A failure of the other source shows a notice and the film goes on with
+its own audio. These texts are English literals, not yet in the app's
+translation tables.
 
 ## Source requirements
 
@@ -128,10 +161,12 @@ the device.
 
 ## Testing on a TV
 
-Not possible until the app wiring exists. Once it does: build and install as in
-the [main build recipe](../../../README.md#building) (`tools/arm.sh`, or
-`ares-install` / Homebrew Channel with the built `.ipk`), play A, choose B from
-the audio sheet, then check start, seek, pause, offset steps, a deliberately
-dead B link, and sync at the start and end of a film. Reports should include
+Build and install as in the [main build recipe](../../../README.md#building)
+(`tools/arm.sh`, or `ares-install` / Homebrew Channel with the built `.ipk`),
+set the flag, play A and choose B from the audio sheet. Worth checking, in this
+order: that picture and sound start at all; Dolby Vision still reported by the
+TV; seek forward and back; pause and resume; offset steps; a deliberately dead
+B link (the notice, then A's audio); turning it off; sync at the start and near
+the end of a film; memory over a long session. Reports should include
 model, firmware, the codecs of both sources and the `[ext-audio]` / `[dts]`
 log lines.
