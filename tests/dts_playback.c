@@ -49,6 +49,9 @@ void dts_engine_allow_p7(DtsEngine *e,int on) { (void)e; (void)on;
  last_p7=on;
 }
 void dts_engine_dv(DtsEngine *e,int on) { (void)e; last_dv=on; }
+/* No session here asks for external audio: one engine, always the default role. */
+void dts_engine_role(DtsEngine *e,int role) { (void)e; assert(role==DTS_ENGINE_AV); }
+void dts_engine_ahead_mib(DtsEngine *e,int mib) { (void)e; (void)mib; assert(!"no second engine without external audio"); }
 DtsEngine *dts_engine_create(void) { return calloc(1,sizeof(DtsEngine)); }
 int dts_engine_open(DtsEngine *e,const char *url,const char *headers,int stream,int core,double target) {
  (void)headers;assert(!strcmp(url,"fixture://movie"));
