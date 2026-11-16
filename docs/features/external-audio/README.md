@@ -12,8 +12,8 @@ separate streams into LG's hardware pipeline, the same path as the
 |---|---|
 | Engine (`src/dts/dts_engine.*`): video-only and audio-only roles, per-engine read-ahead | Done, host-tested |
 | Playback worker (`src/dts/dts_playback.*`): second engine, offset, seek, fallback | Done, host-tested |
-| App wiring (`src/video.c`): start, offset, failure note | Done, compiled on the host; never linked into a test or run |
-| Audio sheet rows (`src/faixas.c`) | Done, compiled on the host; never drawn or driven |
+| App wiring (`src/video.c`): start, offset, failure note | Done, cross-compiled and linked into the ARM app; never run |
+| Audio sheet rows (`src/faixas.c`) | Done, cross-compiled and linked into the ARM app; never drawn or driven |
 | Behavior on a TV | **Not validated** |
 
 The feature is off unless the flag below is set. With it off nothing new is
@@ -175,10 +175,13 @@ path and was left as it is.
 - **Locally** (Windows, MSVC with a pthread shim, FFmpeg 7 shared libraries):
   the same fixtures during development.
 
+- **The ARM app itself** (`.github/workflows/webos-ipk.yml`): `tools/arm.sh
+  --ipk --build` in the SDK image cross-compiles and links the whole app with
+  this change and packages the `.ipk`, passing the script's own checks.
+
 What that does **not** cover: no test calls `video_ext_audio_*` or drives the
-audio sheet rows, so the app wiring and the UI are compiled but never executed;
-the ARM build of the app (`tools/arm.sh`) was not run; and the engine fixture
-does not exercise B as DTS (the conversion path is the existing one, with a
+audio sheet rows, so the app wiring and the UI are built but never executed;
+and the engine fixture does not exercise B as DTS (the conversion path is the existing one, with a
 decoder chosen by codec in the audio-only role).
 
 Host tests do not establish playback on any TV. Whether the Starfish pipeline
@@ -186,11 +189,28 @@ accepts audio whose timeline comes from another file, how A/V sync holds over a
 film, and the cost of a second download on a 1-2 GB TV can only be measured on
 the device.
 
+## Getting an .ipk
+
+Either the [main build recipe](../../../README.md#building) on a computer
+(`tools/arm.sh --ipk --build`, Docker or Podman), or the "Build webOS IPK"
+workflow of the fork: it runs on pushes to this branch that touch code and
+uploads the package as an artifact of the run.
+
+- Server URLs and client ids are not in the source. The workflow takes them
+  from the repository secret `NUVIO_LOCAL_PROPERTIES` (the contents of a
+  `local.properties` file). Without the secret the package builds, but the app
+  has no account server and stops at the login screen. With it, the values end
+  up inside the binary of a downloadable artifact, as they do in any release.
+- The package has the same app id and version as the released app, so
+  installing it replaces the one on the TV.
+- The CI package has no P2P engine (`tools/arm.sh` reports it): torrent-only
+  sources do not play in it. Direct HTTP sources, which are what external
+  audio uses, are unaffected.
+
 ## Testing on a TV
 
-Build and install as in the [main build recipe](../../../README.md#building)
-(`tools/arm.sh`, or `ares-install` / Homebrew Channel with the built `.ipk`),
-set the flag, play A and choose B from the audio sheet. Worth checking, in this
+Install the `.ipk` (`ares-install`, or Homebrew Channel), set the flag, play A
+and choose B from the audio sheet. Worth checking, in this
 order: that picture and sound start at all; Dolby Vision still reported by the
 TV; seek forward and back; pause and resume; offset steps; a deliberately dead
 B link (the notice, then A's audio); turning it off; sync at the start and near
