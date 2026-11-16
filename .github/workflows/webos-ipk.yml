@@ -1,0 +1,108 @@
+name: Build webOS IPK
+# Cross-compiles the LG webOS app the way `bash tools/arm.sh --ipk --build`
+# does on a computer and uploads the .ipk as an artifact. Nothing is deployed.
+#
+# Server URLs and client ids are not in the source (see README, "Building").
+# With the repository secret NUVIO_LOCAL_PROPERTIES holding the contents of a
+# local.properties file, the package is a working app. Without it the build
+# still proves that the ARM target compiles and packages, but the app has no
+# account server and stops at the login screen.
+#
+# The .ipk uses the same app id as the released app: installing it replaces
+# the one on the TV.
+on:
+  push:
+    branches: [feat/external-audio]
+    paths:
+      - "src/**"
+      - "tools/**"
+      - "deploy/**"
+      - "rust/**"
+      - ".github/workflows/webos-ipk.yml"
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: webos-ipk-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  ipk:
+    name: webOS .ipk
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    env:
+      SDK_IMAGE: nuvio-webos-sdk
+      SDK_URL: https://github.com/openlgtv/buildroot-nc4/releases/download/webos-a38c582/arm-webos-linux-gnueabi_sdk-buildroot-x86_64.tar.gz
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      # The SDK image carries the toolchain and the static libass and FFmpeg
+      # for ARM: about twenty minutes to build, so it is kept between runs.
+      - name: Restore the SDK image
+        id: sdk
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ runner.temp }}/sdk-image.tar.zst
+          key: webos-sdk-${{ hashFiles('tools/Dockerfile', 'tools/build-ass-arm.sh', 'tools/build-dts-ffmpeg.sh') }}
+      - name: Load the SDK image
+        if: steps.sdk.outputs.cache-hit == 'true'
+        run: zstd -d -c "$RUNNER_TEMP/sdk-image.tar.zst" | docker load
+      - name: Build the SDK image
+        if: steps.sdk.outputs.cache-hit != 'true'
+        run: |
+          docker build --platform linux/amd64 --build-arg SDK_URL="$SDK_URL" -t "$SDK_IMAGE" tools/
+          docker save "$SDK_IMAGE" | zstd -T0 -3 -o "$RUNNER_TEMP/sdk-image.tar.zst"
+      - name: Save the SDK image
+        if: steps.sdk.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ runner.temp }}/sdk-image.tar.zst
+          key: ${{ steps.sdk.outputs.cache-primary-key }}
+      - name: Install the webOS packaging CLI
+        run: npm install --no-audit --no-fund --prefix "$RUNNER_TEMP/ares" @webos-tools/cli@3
+      - name: Server configuration from the repository secret, if any
+        id: config
+        env:
+          NUVIO_LOCAL_PROPERTIES: ${{ secrets.NUVIO_LOCAL_PROPERTIES }}
+        run: |
+          if [ -n "$NUVIO_LOCAL_PROPERTIES" ]; then
+            printf '%s\n' "$NUVIO_LOCAL_PROPERTIES" > local.properties
+            echo "configured=yes" >> "$GITHUB_OUTPUT"
+          else
+            echo "configured=no" >> "$GITHUB_OUTPUT"
+            echo "::warning::No NUVIO_LOCAL_PROPERTIES secret: this .ipk has no account server and stops at the login screen."
+          fi
+      - name: Build and package
+        env:
+          NUVIO_CONTAINER_RUNTIME: docker
+          NUVIO_BUILD_PLATFORM: linux/amd64
+          NUVIO_SDK_IMAGE: ${{ env.SDK_IMAGE }}
+        run: |
+          mkdir -p out
+          NUVIO_ARES_PACKAGE="$RUNNER_TEMP/ares/node_modules/.bin/ares-package" \
+            NUVIO_RELEASE_OUT="$PWD/out" bash tools/arm.sh --ipk --build
+          ls -l out
+      - name: Never keep the configuration file
+        if: always()
+        run: rm -f local.properties
+      - name: Summary
+        run: |
+          {
+            echo "### webOS .ipk"
+            echo
+            echo "- Commit: \`${GITHUB_SHA::9}\`"
+            echo "- Server configuration: **${{ steps.config.outputs.configured }}**"
+            echo "- External audio stays off until \`/tmp/nuvio-ext-audio\` exists on the TV."
+            echo
+            echo '```'
+            (cd out && sha256sum ./*.ipk)
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload the .ipk
+        uses: actions/upload-artifact@v4
+        with:
+          name: nuvio-webos-ipk-${{ github.sha }}
+          path: out/*.ipk
+          if-no-files-found: error
+          retention-days: 30
