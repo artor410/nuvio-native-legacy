@@ -140,19 +140,35 @@ ending first.
 
 `dts_ext_engine` checks, against the real demuxer: A opens video-only with no
 feedable audio track and delivers only video; B opens audio-only and delivers
-only the chosen track, byte-identical to the file for E-AC-3, AC-3 and AAC-LC;
-seek lands on the packet containing the target; B's read-ahead is its own; an
-undecodable codec is refused.
+only the chosen track, with the exact bytes of the file for E-AC-3, AC-3 and
+AAC-LC; seek lands on the packet containing the target; B's read-ahead is its
+own; an undecodable codec (FLAC) is refused.
+
+One thing that fixture showed: the minimal FFmpeg build has no AC-3 parser, so
+E-AC-3 and AAC packets arrive without a duration, and the passthrough rule that
+already existed (drop a packet that ends at or before the start target) then
+drops the packet sitting exactly on the target. At most the first packets of a
+start or seek are lost (one E-AC-3 frame, two or three AAC frames in the
+fixture); no later byte differs. The same happens today on the Dolby Vision
+path and was left as it is.
 
 ### What was actually run
 
-Both fixtures were run on Windows with MSVC and a local pthread shim, the
-engine one against FFmpeg 7 shared libraries, because the development machine
-had no Linux toolchain. All scenarios passed, as did the 52 existing
-`tests/dts_playback.c` scenarios. **The `.sh` scripts themselves, the
-`gcc -Wall -Wextra -Werror` build, the sanitizer runs and the pinned static
-FFmpeg 7.1.5 were not run**, and neither was the "undecodable codec" case (it
-depends on the minimal build). The CI workflow lists both scripts.
+- **GitHub Actions on the fork** (`.github/workflows/external-audio.yml`,
+  ubuntu-24.04, gcc `-Wall -Wextra -Werror`): the 52 existing playback worker
+  scenarios and the 15 new ones, each also under ASan/UBSan; the existing
+  engine fixtures and the new one against the pinned static FFmpeg 7.1.5;
+  `tests/video_acb_lg.sh`, which compiles, links and runs the luna branch of
+  `src/video.c`; and a compile-only check of `src/faixas.c` with and without
+  the webOS defines.
+- **Locally** (Windows, MSVC with a pthread shim, FFmpeg 7 shared libraries):
+  the same two fixtures during development.
+
+What that does **not** cover: no test calls `video_ext_audio_*` or drives the
+audio sheet rows, so the app wiring and the UI are compiled but never executed;
+the ARM build of the app (`tools/arm.sh`) was not run; and the engine fixture
+does not exercise B as DTS (the conversion path is the existing one, with a
+decoder chosen by codec in the audio-only role).
 
 Host tests do not establish playback on any TV. Whether the Starfish pipeline
 accepts audio whose timeline comes from another file, how A/V sync holds over a
