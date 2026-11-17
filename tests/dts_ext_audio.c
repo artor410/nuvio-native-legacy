@@ -27,7 +27,8 @@ static int load_channels;
 static atomic_int b_fail_open, b_fail_next, b_jump_back, b_eof_at, a_eof_at, refuse_eac3;
 static void (*native_event)(void *,const char *);
 static void *native_user;
-struct DtsEngine { DtsMediaInfo info; atomic_int cancelled; unsigned char packet[8]; int serial, b, role, ahead; double base; };
+struct DtsEngine { DtsMediaInfo info; atomic_int cancelled; unsigned char packet[8]; int serial, b, role, ahead, dv; double base; };
+static int a_dv, b_dv; /* Transport flag each source was opened with. */
 struct DtsPipeline { void (*event)(void *,const char *); void *user; int loaded, completed; };
 struct DtsSubtitles { int unused; };
 static void nap(void) { struct timespec t={0,1000000};nanosleep(&t,NULL); }
@@ -38,7 +39,7 @@ static void emit(const char *json) {
 }
 int dts_engine_available(void) { return 1; }
 void dts_engine_allow_p7(DtsEngine *e,int on) { (void)e;(void)on; }
-void dts_engine_dv(DtsEngine *e,int on) { (void)e;(void)on; }
+void dts_engine_dv(DtsEngine *e,int on) { e->dv=on; }
 void dts_engine_role(DtsEngine *e,int role) { e->role=role; }
 void dts_engine_ahead_mib(DtsEngine *e,int mib) { e->ahead=mib; }
 void dts_engine_buffer_info(DtsEngine *e,DtsBufferInfo *out) { (void)e;memset(out,0,sizeof *out); }
@@ -52,8 +53,8 @@ int dts_engine_open(DtsEngine *e,const char *url,const char *headers,int stream,
  (void)core;e->b=!strcmp(url,DUB);assert(e->b || !strcmp(url,MOVIE));
  memset(&e->info,0,sizeof e->info);e->base=target;e->serial=0;
  pthread_mutex_lock(&fixture);
- if(e->b) { b_opens++;b_role=e->role;b_ahead=e->ahead;b_stream=stream;b_target=target; }
- else { a_opens++;a_role=e->role;a_target=target; }
+ if(e->b) { b_opens++;b_role=e->role;b_ahead=e->ahead;b_stream=stream;b_target=target;b_dv=e->dv; }
+ else { a_opens++;a_role=e->role;a_target=target;a_dv=e->dv; }
  pthread_mutex_unlock(&fixture);
  if(e->b) {
   /* The other source gets its own headers, never the movie's credentials. */
@@ -191,6 +192,8 @@ int main(int argc,char **argv) {
   assert(count(&audio_a)==0);
   assert(a_role==DTS_ENGINE_VIDEO_ONLY && b_role==DTS_ENGINE_AUDIO_ONLY);
   assert(b_ahead>=4 && b_ahead<=8); /* Small read-ahead of its own. */
+  /* Both reuse the final address, even outside a Dolby Vision session. */
+  assert(a_dv==1 && b_dv==1);
   assert(!strcmp(load_audio,"eac3") && load_channels==6);
   assert(!strcmp(s.info.video_codec,"hevc") && !strcmp(s.info.audio_codec,"eac3") && s.info.dovi_profile==8);
   dts_playback_close(p);assert(count(&b_destroyed)==1);
@@ -221,6 +224,7 @@ int main(int argc,char **argv) {
   s=status(p);assert(s.prepared && !s.failed && !s.ext_audio && s.ext_fallback && strstr(s.ext_error,"dub failure"));
   assert(count(&total_b)==0 && a_role==DTS_ENGINE_AV && !strcmp(load_audio,"aac"));
   assert(count(&loads)==1 && count(&a_opens)==1);
+  assert(a_dv==0); /* Back to its own audio: the session's own choice again. */
   assert(saw_event(p,"ext-audio-fallback"));
   dts_playback_close(p);
  } else if(!strcmp(argv[1],"midfail") || !strcmp(argv[1],"discontinuity")) {

@@ -2527,7 +2527,10 @@ void video_bombear(void) {
     reconErroPend = 0;
     if (reconPermitida && urlAtual[0] && (reconIniciou || recon.tentativa) &&
         nv_recon_erro(&recon, reconErroRede, SDL_GetTicks(),
-                      recarregarPausa >= 0 ? posAoCarregar : posSeg)) {
+                      /* A reload still waiting for its Load has posSeg back at
+                       * 0; its target is posAoCarregar (measured on an LG A1:
+                       * the film restarted at 0 s after a failed reload). */
+                      (recarregarPausa >= 0 || (!pronto && posAoCarregar > 1.0)) ? posAoCarregar : posSeg)) {
       if (!antes && recarregarPausa < 0) {
         reconAudio = audioAtual; reconLeg = legAtual;
         snprintf(reconLegUrl, sizeof reconLegUrl, "%s", legUrlAtual);

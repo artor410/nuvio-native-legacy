@@ -240,7 +240,11 @@ static int extPrepare(DtsPlayback *p, double target, int reuse) {
   pthread_mutex_unlock(&p->lock);
   dts_engine_role(e, DTS_ENGINE_AUDIO_ONLY);
   dts_engine_ahead_mib(e, DTS_EXT_AHEAD_MIB);
-  dts_engine_dv(e, p->dv);
+  /* On an audio-only engine the Dolby Vision flag only picks the transport:
+   * the address behind the add-on redirects is reused instead of followed
+   * again for every range. Measured on an LG A1 (2026-11-17): a debrid link
+   * through its add-on answered HTTP 429 within seconds without it. */
+  dts_engine_dv(e, 1);
   nativeEvent(p, "{\"dtsStage\":{\"name\":\"ext-audio-open-requested\"}}");
   /* With no exact track the engine takes the first one the path can feed. */
   int opened = dts_engine_open(e, url, headers, stream, 0, at) >= 0;
@@ -306,6 +310,9 @@ static int prepareMode(DtsPlayback *p, int stream, int core, double target,int r
   if(!reused) {
     nativeEvent(p,"{\"dtsStage\":{\"name\":\"source-open-requested\"}}");
     dts_engine_role(p->engine, role);
+    /* Video-only: the same transport choice as the other source (see
+     * extPrepare); no audio track is selected, so nothing else changes. */
+    dts_engine_dv(p->engine, p->dv || ext);
     if (dts_engine_open(p->engine, p->url, p->headers, stream, core, target) < 0) {
       fail(p, dts_engine_error(p->engine)); return 0;
     }
