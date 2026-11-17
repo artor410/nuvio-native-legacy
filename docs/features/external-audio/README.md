@@ -207,6 +207,35 @@ uploads the package as an artifact of the run.
   sources do not play in it. Direct HTTP sources, which are what external
   audio uses, are unaffected.
 
+## First run on a TV (LG OLED55A1PSA, webOS 6.5.3, 2026-11-17)
+
+Installed by copying the CI package over the app, flag set, driven through the
+app's own `/tmp/nuvio-key` hook. A was a 4K Dolby Vision profile 8.1 MKV (AC-3
+tracks in Russian, Ukrainian and English) from a debrid service through its
+add-on, played by the TV player.
+
+- The audio sheet shows the new row, and the picker lists the 48 direct
+  sources already resolved for the title.
+- B = a FrostStream 720p dub: its server answered HTTP 526 (Cloudflare origin
+  error). The worker reported it, and the app went back to the TV player at
+  the same position.
+- B = a debrid 1080p WEB-DL through the same add-on: every 1 MiB range followed
+  the add-on redirect again and the add-on answered HTTP 429 for both sources.
+  Fixed: both engines of an external audio session now reuse the final address.
+- The reload after that failure hit a network error before its Load, and the
+  reconnection restarted the film at 0 s. Fixed: a reload still waiting for its
+  Load reconnects to its own target (verified on the TV: 755 s).
+- Second attempt, with both fixes: the debrid CDN refused TCP connections from
+  the TV (curl error 7) for B, for A and for the TV player alike. Probably a
+  limit on parallel connections: the fed path opens four lanes per source,
+  the TV player one. Not resolved; the feature has not yet played a frame with
+  audio from another source on a TV.
+
+Two things this run showed about use: the picker shows only the source name
+(AIOStreams names are stylized and carry no language), so finding a dub is
+guesswork; and with Settings > Dolby Vision in MKV off, a Dolby Vision file is
+played by the TV player and external audio has to move it to the fed path.
+
 ## Testing on a TV
 
 Install the `.ipk` (`ares-install`, or Homebrew Channel), set the flag, play A
